@@ -527,6 +527,71 @@ ReadSystemLineRes ReadOneSystemTraceLine(const char* start,
   return ReadSystemLineRes::kNeedsMoreData;
 }
 
+bool MinifyJson(std::string_view json, std::string* out) {
+  // JSON parsers only skip whitespace between tokens, so removing it changes
+  // nothing for well formed JSON. For malformed JSON it can change the result
+  // in two ways, which are avoided: tokens it separates would merge (e.g.
+  // "[1 2]" into "[12]"), so one space is kept between them; and the parser
+  // rejects truncated literals (e.g. "f }") with an error which depends on
+  // how much input follows, so JSON with invalid literals is not minified.
+  auto is_space = [](char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+  };
+  auto is_word = [&](char c) {
+    return c != '{' && c != '}' && c != '[' && c != ']' && c != ',' &&
+           c != ':' && c != '"' && !is_space(c);
+  };
+  const char* cur = json.data();
+  const char* end = cur + json.size();
+  out->clear();
+  out->reserve(json.size());
+  const char* run_start = cur;
+  bool after_word = false;
+  while (cur != end) {
+    char c = *cur;
+    if (c == '"') {
+      // Strings are copied verbatim: find the closing quote exactly as the
+      // parser does.
+      std::string_view str;
+      bool has_escapes;
+      base::Status status;
+      if (json::internal::ScanString(cur, end, cur, str, has_escapes, status) !=
+          json::internal::ReturnCode::kOk) {
+        return false;
+      }
+      after_word = false;
+      continue;
+    }
+    if (is_space(c)) {
+      out->append(run_start, cur);
+      do {
+        ++cur;
+      } while (cur != end && is_space(*cur));
+      run_start = cur;
+      if (after_word && cur != end && is_word(*cur)) {
+        out->push_back(' ');
+        after_word = false;
+      }
+      continue;
+    }
+    if (is_word(c) && !after_word && (c == 't' || c == 'f' || c == 'n')) {
+      std::string_view literal = c == 't'   ? "true"
+                                 : c == 'f' ? "false"
+                                            : "null";
+      size_t left = static_cast<size_t>(end - cur);
+      if (left < literal.size() ||
+          std::string_view(cur, literal.size()) != literal ||
+          (left > literal.size() && is_word(cur[literal.size()]))) {
+        return false;
+      }
+    }
+    after_word = is_word(c);
+    ++cur;
+  }
+  out->append(run_start, end);
+  return true;
+}
+
 JsonTraceTokenizer::JsonTraceTokenizer(TraceProcessorContext* ctx)
     : context_(ctx),
       parser_(ctx),
@@ -676,6 +741,8 @@ bool JsonTraceTokenizer::ParseTraceEventContents() {
   int64_t ts = std::numeric_limits<int64_t>::max();
   std::optional<IdResult> id2_local;
   std::optional<IdResult> id2_global;
+  // Points into |buffer_|, so only valid until this function returns.
+  std::string_view args;
   bool saw_field = false;
   for (;;) {
     switch (it_.ParseObjectFieldWithoutRecursing()) {
@@ -809,11 +876,11 @@ bool JsonTraceTokenizer::ParseTraceEventContents() {
         return false;
       }
     } else if (it_.key() == "args") {
-      std::string_view args = GetObjectValue(it_.value());
-      if (!args.empty()) {
-        event.args = std::make_unique<char[]>(args.size());
-        memcpy(event.args.get(), args.data(), args.size());
-        event.args_size = args.size();
+      // Non-object values are ignored, so a repeated "args" key only replaces
+      // the earlier one if it holds an object.
+      std::string_view obj = GetObjectValue(it_.value());
+      if (!obj.empty()) {
+        args = obj;
       }
     } else if (it_.key() == "id2") {
       std::string_view id2 = GetObjectValue(it_.value());
@@ -874,7 +941,7 @@ bool JsonTraceTokenizer::ParseTraceEventContents() {
         base::MurmurHashCombine(event.cat.raw_id(), event.id.id_uint64));
   }
   if (PERFETTO_UNLIKELY(event.phase == 'P')) {
-    if (status = ParseV8SampleEvent(event); !status.ok()) {
+    if (status = ParseV8SampleEvent(event, args); !status.ok()) {
       RecordEventError(stats::json_tokenizer_failure, status);
       return true;
     }
@@ -882,12 +949,25 @@ bool JsonTraceTokenizer::ParseTraceEventContents() {
   }
   auto trace_ts = context_->clock_tracker->ConvertDefaultClockToTraceTime(ts);
   if (trace_ts) {
+    if (!args.empty()) {
+      SetEventArgs(args, &event);
+    }
     json_stream_->Push(*trace_ts, std::move(event));
   }
   return true;
 }
 
-base::Status JsonTraceTokenizer::ParseV8SampleEvent(const JsonEvent& event) {
+void JsonTraceTokenizer::SetEventArgs(std::string_view args, JsonEvent* event) {
+  if (MinifyJson(args, &minified_args_)) {
+    args = minified_args_;
+  }
+  event->args = std::make_unique<char[]>(args.size());
+  memcpy(event->args.get(), args.data(), args.size());
+  event->args_size = args.size();
+}
+
+base::Status JsonTraceTokenizer::ParseV8SampleEvent(const JsonEvent& event,
+                                                    std::string_view args) {
   uint64_t id;
   if (event.id_type == JsonEvent::IdType::kString) {
     std::optional<uint64_t> id_opt = base::StringToUInt64(
@@ -903,8 +983,7 @@ base::Status JsonTraceTokenizer::ParseV8SampleEvent(const JsonEvent& event) {
     return base::OkStatus();
   }
 
-  auto profile_or =
-      ParseV8ProfileArgs(std::string_view(event.args.get(), event.args_size));
+  auto profile_or = ParseV8ProfileArgs(args);
   if (!profile_or.ok()) {
     return base::OkStatus();
   }

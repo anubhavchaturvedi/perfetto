@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -70,6 +71,14 @@ ReadSystemLineRes ReadOneSystemTraceLine(const char* start,
                                          std::string* line,
                                          const char** next);
 
+// Writes to |out| the JSON value |json| without the whitespace outside of
+// strings, which no JSON consumer can tell apart from |json|. Returns false,
+// leaving |out| in an unspecified state, for the few malformed inputs where
+// that cannot be guaranteed (see the implementation): callers should then
+// keep |json| as is.
+// Visible for testing.
+bool MinifyJson(std::string_view json, std::string* out);
+
 // Reads a JSON trace in chunks and extracts top level json objects.
 class JsonTraceTokenizer : public ChunkedTraceReader {
  public:
@@ -117,7 +126,11 @@ class JsonTraceTokenizer : public ChunkedTraceReader {
 
   bool ParseTraceEventContents();
 
-  base::Status ParseV8SampleEvent(const JsonEvent& event);
+  base::Status ParseV8SampleEvent(const JsonEvent& event,
+                                  std::string_view args);
+
+  // Stores a copy of the raw JSON |args| of |event|, minified if possible.
+  void SetEventArgs(std::string_view args, JsonEvent* event);
 
   base::Status HandleTraceEvent(const char* start,
                                 const char* end,
@@ -169,6 +182,8 @@ class JsonTraceTokenizer : public ChunkedTraceReader {
   // Used to glue together JSON objects that span across two (or more)
   // Parse boundaries.
   std::vector<char> buffer_;
+  // Scratch space for minifying the args of an event.
+  std::string minified_args_;
 };
 
 }  // namespace perfetto::trace_processor

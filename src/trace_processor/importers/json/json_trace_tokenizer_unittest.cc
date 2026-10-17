@@ -164,5 +164,37 @@ TEST(JsonTraceTokenizerTest, ReadSystraceEndOfData) {
   ASSERT_EQ(next, end);
 }
 
+TEST(JsonTraceTokenizerTest, MinifyJsonDropsWhitespaceOutsideStrings) {
+  std::string out;
+  ASSERT_TRUE(
+      MinifyJson("{\n  \"a b\" : 1 ,\r\n\t\"c\": [ 1.5, true ,null ],"
+                 " \"d\": { \"e\" : \" x \\\" y \" }, \"f\": false }",
+                 &out));
+  ASSERT_EQ(out,
+            R"({"a b":1,"c":[1.5,true,null],"d":{"e":" x \" y "},"f":false})");
+
+  ASSERT_TRUE(MinifyJson("{ }", &out));
+  ASSERT_EQ(out, "{}");
+
+  ASSERT_TRUE(MinifyJson(R"({"a":"\\", "b":"\\\"" , "c" :"\u00e9 "})", &out));
+  ASSERT_EQ(out, R"({"a":"\\","b":"\\\"","c":"\u00e9 "})");
+}
+
+TEST(JsonTraceTokenizerTest, MinifyJsonMalformedJson) {
+  std::string out;
+  // Whitespace between two tokens which would otherwise merge is kept.
+  ASSERT_TRUE(MinifyJson(R"({"a": [1  2, x  y]})", &out));
+  ASSERT_EQ(out, R"({"a":[1 2,x y]})");
+  ASSERT_TRUE(MinifyJson(R"({"a" 1, "b": 2 "c"})", &out));
+  ASSERT_EQ(out, R"({"a"1,"b":2"c"})");
+  // Invalid literals, which the parser rejects with an error depending on the
+  // length of the input left, and unterminated strings are not minified.
+  ASSERT_FALSE(MinifyJson(R"({"a": tr ue})", &out));
+  ASSERT_FALSE(MinifyJson(R"({"a": f  })", &out));
+  ASSERT_FALSE(MinifyJson(R"({"a": nul })", &out));
+  ASSERT_FALSE(MinifyJson(R"({"a": truex })", &out));
+  ASSERT_FALSE(MinifyJson(R"({"a": "x })", &out));
+}
+
 }  // namespace
 }  // namespace perfetto::trace_processor
