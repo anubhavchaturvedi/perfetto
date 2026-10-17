@@ -28,6 +28,7 @@
 #include "perfetto/base/status.h"
 #include "perfetto/ext/base/file_utils.h"
 #include "perfetto/ext/base/scoped_file.h"
+#include "perfetto/ext/base/status_macros.h"
 #include "perfetto/ext/base/temp_file.h"
 
 #if PERFETTO_BUILDFLAG(PERFETTO_OS_WIN)
@@ -268,9 +269,9 @@ class LocalFileSystem final : public FileSystem {
     return base::OkStatus();
   }
   base::Status CreateTemporaryFile(std::unique_ptr<File>* file) override {
-    base::TempFile temporary = base::TempFile::CreateUnlinked();
-    if (!temporary.fd())
-      return base::ErrStatus("Failed to create temporary file");
+    ASSIGN_OR_RETURN(
+        base::TempFile temporary,
+        base::TempFile::Create(base::TempFile::LinkMode::kUnlinked));
     file->reset(new LocalFile("<temporary>", temporary.ReleaseFD()));
     return base::OkStatus();
   }
