@@ -60,6 +60,9 @@ class TraceFileTracker {
   std::vector<tables::TraceFileTable::Id> parsing_stack_;
   // Indexed by file id, holding what GetName() returns.
   std::vector<StringId> names_;
+  // Indexed by file id: whether the file is a trace, which gets per-trace
+  // trace_type and trace_size_bytes metadata.
+  std::vector<bool> logs_metadata_;
 };
 
 }  // namespace perfetto::trace_processor

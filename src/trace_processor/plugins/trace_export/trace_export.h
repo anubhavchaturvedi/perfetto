@@ -24,7 +24,7 @@
 #include "src/trace_processor/core/plugin/registration.h"
 
 namespace perfetto::trace_processor {
-class StringPool;
+class TraceStorage;
 }  // namespace perfetto::trace_processor
 
 namespace perfetto::trace_processor::trace_export {
@@ -36,10 +36,10 @@ void RegisterPlugin();
 // a cross-version-compatible tar of self-contained Arrow files for external
 // consumers and cannot be loaded back into Trace Processor. kPerfetto adds the
 // internal manifest that lets a fresh instance from the same version reload
-// those tables; loading it in a different version may work but is not
-// guaranteed.
+// those tables, and the metadata and stats of |storage|; loading it in a
+// different version may work but is not guaranteed.
 base::Status WriteExport(const std::vector<PluginDataframe>& dataframes,
-                         const StringPool& pool,
+                         const TraceStorage& storage,
                          TraceProcessor::ExportFormat format,
                          TraceProcessor::ExportOutput* output);
 

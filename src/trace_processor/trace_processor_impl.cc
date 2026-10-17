@@ -1252,8 +1252,8 @@ base::Status TraceProcessorImpl::Export(ExportFormat format,
         base::OnScopeExit([conn] { conn->SetAttachCreateWriteEnabled(false); });
     return ExportSqliteDatabase(this, file_system, *path);
   }
-  return trace_export::WriteExport(
-      plugin_dataframes_, context()->storage->string_pool(), format, output);
+  return trace_export::WriteExport(plugin_dataframes_, *context()->storage,
+                                   format, output);
 }
 
 }  // namespace perfetto::trace_processor

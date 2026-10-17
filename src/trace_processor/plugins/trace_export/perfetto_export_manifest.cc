@@ -29,6 +29,7 @@
 #include "perfetto/ext/base/status_or.h"
 #include "src/trace_processor/core/dataframe/dataframe.h"
 #include "src/trace_processor/core/dataframe/specs.h"
+#include "src/trace_processor/plugins/trace_export/perfetto_export_session.h"
 #include "src/trace_processor/util/simple_json_serializer.h"
 
 namespace perfetto::trace_processor::trace_export {
@@ -200,7 +201,8 @@ void WriteFiles(json::JsonArraySerializer& files,
 
 void WriteManifest(json::JsonDictSerializer& manifest,
                    const std::vector<const PluginDataframe*>& tables,
-                   const char* writer_version) {
+                   const char* writer_version,
+                   const TraceStorage& storage) {
   manifest.AddInt("version", 1);
   manifest.AddDict("attributes", [&](json::JsonDictSerializer& attributes) {
     attributes.AddString("perfetto_export_writer_version", writer_version);
@@ -208,17 +210,24 @@ void WriteManifest(json::JsonDictSerializer& manifest,
   manifest.AddArray("files", [&](json::JsonArraySerializer& files) {
     WriteFiles(files, tables);
   });
+  // Readers ignore unknown keys of the manifest, so versions without session
+  // support still load the tables of the archive.
+  manifest.AddDict("__exported_session",
+                   [&](json::JsonDictSerializer& session) {
+                     WritePerfettoExportSession(storage, session);
+                   });
 }
 
 }  // namespace
 
 std::string SerializePerfettoExportManifest(
     const std::vector<const PluginDataframe*>& tables,
-    const char* writer_version) {
+    const char* writer_version,
+    const TraceStorage& storage) {
   return json::SerializeJson([&](json::JsonValueSerializer&& root) {
     std::move(root).WriteDict([&](json::JsonDictSerializer& top) {
       top.AddDict("perfetto_manifest", [&](json::JsonDictSerializer& manifest) {
-        WriteManifest(manifest, tables, writer_version);
+        WriteManifest(manifest, tables, writer_version, storage);
       });
     });
   });

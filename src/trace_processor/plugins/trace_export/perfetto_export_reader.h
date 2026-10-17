@@ -40,6 +40,7 @@ struct PerfettoExportPluginState {
   bool validated = false;
   std::vector<ResolvedPerfettoExportTable> tables;
   std::vector<bool> seen;
+  bool session_restored = false;
 };
 
 // Creates the importer for Arrow members declared by a kPerfetto archive's

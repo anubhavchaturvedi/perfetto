@@ -93,6 +93,34 @@ struct TraceManifestState {
     std::vector<PerfettoExportTableColumn> columns;
   };
 
+  // The internal top-level `__exported_session` block of a Perfetto export
+  // carries the source session's metadata and stats rows, which describe the
+  // trace but are not restored as tables. Like PerfettoExportTable, only the
+  // JSON shape is parsed by the manifest reader: the trace_export plugin owns
+  // the format version and replays the rows through the trackers. Machine and
+  // trace ids keep the numbering of the session which wrote the archive.
+  struct ExportedMetadataRow {
+    std::string name;
+    std::string key_type;
+    std::optional<int64_t> int_value;
+    std::optional<std::string> str_value;
+    std::optional<uint32_t> machine_id;
+    std::optional<uint32_t> trace_id;
+  };
+  struct ExportedStatRow {
+    // Stat names, unlike numeric keys, are stable across versions.
+    std::string name;
+    std::optional<int64_t> idx;
+    int64_t value = 0;
+    std::optional<uint32_t> machine_id;
+    std::optional<uint32_t> trace_id;
+  };
+  struct ExportedSession {
+    int64_t format = 0;
+    std::vector<ExportedMetadataRow> metadata;
+    std::vector<ExportedStatRow> stats;
+  };
+
   struct FileEntry {
     // Exact path of the member within the archive.
     std::string path;
@@ -125,6 +153,9 @@ struct TraceManifestState {
   std::optional<std::string> trace_time_file;
   std::optional<std::string> trace_time_machine;
   std::vector<FileEntry> files;
+
+  // Set when the manifest has an internal `__exported_session` block.
+  std::optional<ExportedSession> exported_session;
 
   // Maps a machine's logical (raw) id - the id the manifest assigns and names
   // machines by - to its machine-table row id, which is what the clock graph

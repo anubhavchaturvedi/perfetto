@@ -55,6 +55,7 @@ tables::TraceFileTable::Id TraceFileTracker::AddFileImpl(StringId name) {
   bool named = !name.is_null() && !context_->storage->GetString(name).empty();
   PERFETTO_DCHECK(names_.size() == id.value);
   names_.push_back(named ? name : inherited_name);
+  logs_metadata_.push_back(false);
   return id;
 }
 
@@ -75,17 +76,21 @@ void TraceFileTracker::StartParsing(tables::TraceFileTable::Id id,
   bool is_container = importers.IsContainer(trace_type);
   row.set_is_container(is_container);
 
-  // We log metadata only for "actual" traces and not for containers (e.g. zip
-  // files, gzip files). We do this because:
+  // We log metadata only for "actual" traces: files which fork a per-trace
+  // context. Containers (e.g. zip files, gzip files), perfetto_manifest
+  // sidecars and the tables of a Perfetto export produce no timeline of their
+  // own; the latter restores the trace_type and trace_size_bytes of the traces
+  // it was exported from instead. We do this because:
   // 1. Tooling (e.g. trace_processor_shell) often queries metadata early in the
   //    ingestion process (before NotifyEndOfFile is called).
   // 2. Parent-child relationships (to identify wrappers) are only fully known
   //    after NotifyEndOfFile.
-  // 3. A hardcoded list of container types allows us to make the logging
-  //    decision immediately.
-  if (is_container) {
+  // 3. The importer's descriptor allows us to make the logging decision
+  //    immediately.
+  if (is_container || !importers.Find(trace_type)->forks_context) {
     return;
   }
+  logs_metadata_[id.value] = true;
 
   context_->global_metadata_tracker->SetMetadata(
       /*machine_id*/ std::nullopt, id, metadata::trace_type,
@@ -98,8 +103,8 @@ void TraceFileTracker::DoneParsing(tables::TraceFileTable::Id id, size_t size) {
   auto row = (*context_->storage->mutable_trace_file_table())[id];
   row.set_size(static_cast<int64_t>(size));
 
-  // Log trace_size_bytes only for non-container traces.
-  if (!row.is_container()) {
+  // Log trace_size_bytes only for the files StartParsing logged as traces.
+  if (logs_metadata_[id.value]) {
     context_->global_metadata_tracker->SetMetadata(
         /*machine_id*/ std::nullopt, id, metadata::trace_size_bytes,
         Variadic::Integer(row.size()));

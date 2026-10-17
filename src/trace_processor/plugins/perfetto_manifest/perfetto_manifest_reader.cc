@@ -29,9 +29,11 @@
 #include <vector>
 
 #include "perfetto/base/status.h"
+#include "perfetto/ext/base/base64.h"
 #include "perfetto/ext/base/flat_hash_map.h"
 #include "perfetto/ext/base/status_macros.h"
 #include "perfetto/ext/base/status_or.h"
+#include "perfetto/ext/base/string_view.h"
 #include "perfetto/trace_processor/trace_blob_view.h"
 #include "src/trace_processor/importers/common/clock_tracker.h"
 #include "src/trace_processor/importers/common/global_metadata_tracker.h"
@@ -196,6 +198,163 @@ ParsePerfettoExportTable(const json::Dom& table) {
                               col["nullability"].AsString(),
                               col["sort"].AsString(),
                               col["duplicates"].AsString()});
+  }
+  return std::move(result);
+}
+
+// Parses an optional non-negative 32-bit id member of an `__exported_session`
+// row. A missing or null member is not an error.
+base::Status ParseOptionalExportedId(const json::Dom& row,
+                                     const char* key,
+                                     std::optional<uint32_t>* out) {
+  if (!row.HasMember(key) || row[key].IsNull()) {
+    return base::OkStatus();
+  }
+  const json::Dom& value = row[key];
+  if (!value.IsIntegral() ||
+      (value.IsInt() &&
+       (value.AsInt64() < 0 ||
+        value.AsInt64() > std::numeric_limits<uint32_t>::max())) ||
+      (value.IsUint() &&
+       value.AsUint64() > std::numeric_limits<uint32_t>::max())) {
+    return base::ErrStatus(
+        "perfetto_manifest: __exported_session: %s must be an integer in "
+        "[0, 4294967295]",
+        key);
+  }
+  *out = static_cast<uint32_t>(value.AsInt64());
+  return base::OkStatus();
+}
+
+// Reads a string member of an `__exported_session` row. Strings which would not
+// survive the JSON escaping round trip (anything beyond printable ASCII) are
+// written base64-encoded under `<key>_b64` instead. Returns nullopt if neither
+// member is present.
+base::StatusOr<std::optional<std::string>> ParseExportedString(
+    const json::Dom& row,
+    const std::string& key) {
+  std::string b64_key = key + "_b64";
+  if (row.HasMember(b64_key) && !row[b64_key].IsNull()) {
+    if (!row[b64_key].IsString()) {
+      return base::ErrStatus(
+          "perfetto_manifest: __exported_session: %s must be a string",
+          b64_key.c_str());
+    }
+    std::optional<std::string> decoded =
+        base::Base64Decode(base::StringView(row[b64_key].AsString()));
+    if (!decoded) {
+      return base::ErrStatus(
+          "perfetto_manifest: __exported_session: %s is not valid base64",
+          b64_key.c_str());
+    }
+    return std::make_optional(std::move(*decoded));
+  }
+  if (row.HasMember(key) && !row[key].IsNull()) {
+    if (!row[key].IsString()) {
+      return base::ErrStatus(
+          "perfetto_manifest: __exported_session: %s must be a string",
+          key.c_str());
+    }
+    return std::make_optional(row[key].AsString());
+  }
+  return std::optional<std::string>();
+}
+
+base::StatusOr<TraceManifestState::ExportedMetadataRow>
+ParseExportedMetadataRow(const json::Dom& row) {
+  if (!row.IsObject() || !row["key_type"].IsString()) {
+    return base::ErrStatus(
+        "perfetto_manifest: __exported_session: metadata entries need a "
+        "name and a string key_type");
+  }
+  ASSIGN_OR_RETURN(std::optional<std::string> name,
+                   ParseExportedString(row, "name"));
+  if (!name) {
+    return base::ErrStatus(
+        "perfetto_manifest: __exported_session: metadata entries need a "
+        "name and a string key_type");
+  }
+  TraceManifestState::ExportedMetadataRow result;
+  result.name = std::move(*name);
+  result.key_type = row["key_type"].AsString();
+  if (row.HasMember("int_value") && !row["int_value"].IsNull()) {
+    if (!row["int_value"].IsIntegral()) {
+      return base::ErrStatus(
+          "perfetto_manifest: __exported_session: metadata '%s': int_value "
+          "must be an integer",
+          result.name.c_str());
+    }
+    result.int_value = row["int_value"].AsInt64();
+  }
+  ASSIGN_OR_RETURN(result.str_value, ParseExportedString(row, "str_value"));
+  RETURN_IF_ERROR(
+      ParseOptionalExportedId(row, "machine_id", &result.machine_id));
+  RETURN_IF_ERROR(ParseOptionalExportedId(row, "trace_id", &result.trace_id));
+  return std::move(result);
+}
+
+base::StatusOr<TraceManifestState::ExportedStatRow> ParseExportedStatRow(
+    const json::Dom& row) {
+  if (!row.IsObject() || !row["value"].IsIntegral()) {
+    return base::ErrStatus(
+        "perfetto_manifest: __exported_session: stats entries need a name "
+        "and an integer value");
+  }
+  ASSIGN_OR_RETURN(std::optional<std::string> name,
+                   ParseExportedString(row, "name"));
+  if (!name) {
+    return base::ErrStatus(
+        "perfetto_manifest: __exported_session: stats entries need a name "
+        "and an integer value");
+  }
+  TraceManifestState::ExportedStatRow result;
+  result.name = std::move(*name);
+  result.value = row["value"].AsInt64();
+  if (row.HasMember("idx") && !row["idx"].IsNull()) {
+    if (!row["idx"].IsIntegral()) {
+      return base::ErrStatus(
+          "perfetto_manifest: __exported_session: stat '%s': idx must be an "
+          "integer",
+          result.name.c_str());
+    }
+    result.idx = row["idx"].AsInt64();
+  }
+  RETURN_IF_ERROR(
+      ParseOptionalExportedId(row, "machine_id", &result.machine_id));
+  RETURN_IF_ERROR(ParseOptionalExportedId(row, "trace_id", &result.trace_id));
+  return std::move(result);
+}
+
+// Parses the internal top-level `__exported_session` block. As with
+// `__exported_table_schema`, only the JSON shape is checked here; the
+// trace_export plugin owns its version and how the rows are restored.
+base::StatusOr<TraceManifestState::ExportedSession> ParseExportedSession(
+    const json::Dom& session) {
+  if (!session.IsObject() || !session["format"].IsIntegral()) {
+    return base::ErrStatus(
+        "perfetto_manifest: __exported_session needs an integer format");
+  }
+  TraceManifestState::ExportedSession result;
+  result.format = session["format"].AsInt64();
+  if (session.HasMember("metadata")) {
+    if (!session["metadata"].IsArray()) {
+      return base::ErrStatus(
+          "perfetto_manifest: __exported_session: metadata must be an array");
+    }
+    for (const json::Dom& row : session["metadata"]) {
+      ASSIGN_OR_RETURN(auto parsed, ParseExportedMetadataRow(row));
+      result.metadata.push_back(std::move(parsed));
+    }
+  }
+  if (session.HasMember("stats")) {
+    if (!session["stats"].IsArray()) {
+      return base::ErrStatus(
+          "perfetto_manifest: __exported_session: stats must be an array");
+    }
+    for (const json::Dom& row : session["stats"]) {
+      ASSIGN_OR_RETURN(auto parsed, ParseExportedStatRow(row));
+      result.stats.push_back(std::move(parsed));
+    }
   }
   return std::move(result);
 }
@@ -425,6 +584,11 @@ base::Status PerfettoManifestReader::OnPushDataToSorter() {
     ASSIGN_OR_RETURN(std::vector<Attribute> attrs,
                      ParseAttributes(meta["attributes"]));
     ApplyAttributes(context_, attrs);
+  }
+
+  if (meta.HasMember("__exported_session")) {
+    ASSIGN_OR_RETURN(state->exported_session,
+                     ParseExportedSession(meta["__exported_session"]));
   }
 
   // Every member declared as a serialized table must be present: a missing

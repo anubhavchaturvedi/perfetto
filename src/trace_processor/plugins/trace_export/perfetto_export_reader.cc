@@ -24,11 +24,15 @@
 #include <string>
 #include <utility>
 
+#include "perfetto/base/logging.h"
 #include "perfetto/base/status.h"
 #include "perfetto/ext/base/status_macros.h"
 #include "perfetto/trace_processor/trace_blob_view.h"
 #include "src/trace_processor/core/dataframe/arrow_deserializer.h"
 #include "src/trace_processor/core/dataframe/dataframe.h"
+#include "src/trace_processor/importers/common/global_metadata_tracker.h"
+#include "src/trace_processor/importers/common/global_stats_tracker.h"
+#include "src/trace_processor/plugins/trace_export/perfetto_export_session.h"
 #include "src/trace_processor/storage/trace_storage.h"
 #include "src/trace_processor/tables/metadata_tables_py.h"
 #include "src/trace_processor/types/trace_manifest_state.h"
@@ -118,6 +122,24 @@ base::Status PerfettoExportTableReader::OnPushDataToSorter() {
   }
   *table->dataframe = std::move(dataframe);
   buffer_ = util::TraceBlobViewReader();
+
+  // The session's metadata and stats rows reference restored tables (e.g. by
+  // machine id), so they are replayed once the last table has been restored.
+  if (manifest->exported_session && !state_->session_restored &&
+      std::all_of(state_->seen.begin(), state_->seen.end(),
+                  [](bool seen) { return seen; })) {
+    state_->session_restored = true;
+    uint32_t skipped = RestorePerfettoExportSession(
+        *manifest->exported_session, context_->storage.get(),
+        context_->global_metadata_tracker.get(),
+        context_->global_stats_tracker.get());
+    if (skipped) {
+      PERFETTO_ELOG(
+          "perfetto_export: skipped %u metadata and stats rows which this "
+          "version of trace processor does not support",
+          skipped);
+    }
+  }
   return base::OkStatus();
 }
 

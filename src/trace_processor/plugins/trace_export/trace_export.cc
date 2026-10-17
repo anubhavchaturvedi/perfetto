@@ -34,16 +34,21 @@
 #include "src/trace_processor/core/plugin/plugin.h"
 #include "src/trace_processor/plugins/trace_export/perfetto_export_manifest.h"
 #include "src/trace_processor/plugins/trace_export/perfetto_export_reader.h"
+#include "src/trace_processor/storage/trace_storage.h"
 #include "src/trace_processor/trace_reader_registry.h"
 #include "src/trace_processor/util/tar_writer.h"
 
 namespace perfetto::trace_processor::trace_export {
 namespace {
 
-// These tables describe the current parsing session rather than trace data.
-// Restoring their rows would corrupt trackers in the loading instance. This
-// filter is specific to the version-coupled kPerfetto format; kArrowTar exports
-// every statically registered dataframe for external consumers.
+// These tables are keyed through trackers of the loading instance, which also
+// write rows of their own, so restoring them as tables would corrupt those
+// trackers. trace_file, import_logs, build_flags and modules describe the
+// loading session. The metadata and stats rows describe the trace: the
+// manifest carries them instead and the loader replays them through the
+// trackers (see perfetto_export_session.h). This filter is specific to the
+// version-coupled kPerfetto format; kArrowTar exports every statically
+// registered dataframe for external consumers.
 constexpr std::string_view kSkippedPerfettoTables[] = {
     "__intrinsic_trace_file",  "__intrinsic_trace_import_logs",
     "__intrinsic_build_flags", "__intrinsic_modules",
@@ -119,7 +124,7 @@ void RegisterPlugin() {
 }
 
 base::Status WriteExport(const std::vector<PluginDataframe>& dataframes,
-                         const StringPool& pool,
+                         const TraceStorage& storage,
                          TraceProcessor::ExportFormat format,
                          TraceProcessor::ExportOutput* output) {
   if (!output) {
@@ -143,8 +148,8 @@ base::Status WriteExport(const std::vector<PluginDataframe>& dataframes,
       tables.push_back(&table);
     }
     if (perfetto) {
-      std::string manifest =
-          SerializePerfettoExportManifest(tables, base::GetVersionString());
+      std::string manifest = SerializePerfettoExportManifest(
+          tables, base::GetVersionString(), storage);
       RETURN_IF_ERROR(tar.AddFile(
           kPerfettoManifestFileName,
           reinterpret_cast<const uint8_t*>(manifest.data()), manifest.size()));
@@ -153,7 +158,8 @@ base::Status WriteExport(const std::vector<PluginDataframe>& dataframes,
         perfetto ? core::dataframe::ArrowSerializer::IdColumnMode::kOmit
                  : core::dataframe::ArrowSerializer::IdColumnMode::kInclude);
     for (const PluginDataframe* table : tables) {
-      RETURN_IF_ERROR(WriteArrowTable(&tar, *table, pool, &serializer));
+      RETURN_IF_ERROR(
+          WriteArrowTable(&tar, *table, storage.string_pool(), &serializer));
     }
   }
   return tar.Finalize();

@@ -25,6 +25,10 @@
 #include "src/trace_processor/core/plugin/registration.h"
 #include "src/trace_processor/types/trace_manifest_state.h"
 
+namespace perfetto::trace_processor {
+class TraceStorage;
+}  // namespace perfetto::trace_processor
+
 namespace perfetto::trace_processor::trace_export {
 
 // kPerfetto archives use a perfetto_manifest to associate each Arrow member
@@ -34,9 +38,12 @@ namespace perfetto::trace_processor::trace_export {
 constexpr char kPerfettoManifestFileName[] = "perfetto_manifest.json";
 constexpr int64_t kPerfettoExportFormatVersion = 1;
 
+// Serializes the manifest declaring |tables|. It also embeds the metadata and
+// stats of |storage| (see perfetto_export_session.h).
 std::string SerializePerfettoExportManifest(
     const std::vector<const PluginDataframe*>& tables,
-    const char* writer_version);
+    const char* writer_version,
+    const TraceStorage& storage);
 
 struct ResolvedPerfettoExportTable {
   const TraceManifestState::FileEntry* entry = nullptr;

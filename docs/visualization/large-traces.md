@@ -45,6 +45,11 @@ the archive, skipping the packet ingestion and sorting of a full parse. It is
 version-coupled: load it with the same version of trace processor that
 produced it (a different version may work, but is not guaranteed).
 
+The archive also carries the original trace's `metadata` and `stats`, so a
+reloaded trace reports the same trace type, size and parsing errors or data
+losses as the original. Only values describing the loading session itself,
+such as `parse_trace_duration_ns`, reflect the reload.
+
 For repeated work on one machine, a background
 [session](/docs/getting-started/command-line-analysis.md#iterate-without-re-parsing-sessions)
 is the lighter-weight alternative; the `perfetto` archive is the portable

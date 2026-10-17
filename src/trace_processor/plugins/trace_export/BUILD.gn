@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import("../../../../gn/perfetto.gni")
+import("../../../../gn/test.gni")
 
 assert(enable_perfetto_trace_processor_sqlite)
 
@@ -22,6 +23,8 @@ source_set("trace_export") {
     "perfetto_export_manifest.h",
     "perfetto_export_reader.cc",
     "perfetto_export_reader.h",
+    "perfetto_export_session.cc",
+    "perfetto_export_session.h",
     "trace_export.cc",
     "trace_export.h",
   ]
@@ -42,5 +45,26 @@ source_set("trace_export") {
     "../../util:tar_writer",
     "../../util:trace_blob_view_reader",
     "../../util:trace_type",
+  ]
+}
+
+perfetto_unittest_source_set("unittests") {
+  testonly = true
+  sources = [ "perfetto_export_session_unittest.cc" ]
+  deps = [
+    ":trace_export",
+    "../..:lib",
+    "../../../../gn:default_deps",
+    "../../../../gn:gtest_and_gmock",
+    "../../../../include/perfetto/trace_processor",
+    "../../../../protos/perfetto/common:zero",
+    "../../../../protos/perfetto/config:zero",
+    "../../../../protos/perfetto/trace:zero",
+    "../../../base",
+    "../../../protozero",
+    "../../importers/common",
+    "../../storage",
+    "../../tables",
+    "../../types",
   ]
 }
