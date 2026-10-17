@@ -52,8 +52,6 @@ source_set("shell") {
     "server_subcommand.h",
     "shell_utils.cc",
     "shell_utils.h",
-    "sql_packages.cc",
-    "sql_packages.h",
     "summarize_subcommand.cc",
     "summarize_subcommand.h",
     "table_result_formatter.cc",
@@ -62,6 +60,7 @@ source_set("shell") {
     "util_subcommand.h",
   ]
   deps = [
+    ":sql_packages",
     ":subcommands",
     "../../../gn:default_deps",
     "../../../gn:protobuf_full",
@@ -102,6 +101,23 @@ source_set("shell") {
       "../rpc:unixd",
     ]
   }
+  public_deps = [ "../../../include/perfetto/trace_processor" ]
+}
+
+# Registers a directory of PerfettoSQL modules as a package (what
+# --add-sql-package does). Kept separate from :shell, which pulls in much
+# more, so that other embedders (e.g. contrib/duckdb-perfetto) can reuse it.
+source_set("sql_packages") {
+  sources = [
+    "sql_packages.cc",
+    "sql_packages.h",
+  ]
+  deps = [
+    "../../../gn:default_deps",
+    "../../../include/perfetto/ext/base",
+    "../../base",
+    "../util:stdlib",
+  ]
   public_deps = [ "../../../include/perfetto/trace_processor" ]
 }
 

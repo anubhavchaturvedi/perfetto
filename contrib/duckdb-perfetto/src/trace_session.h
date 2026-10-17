@@ -52,7 +52,13 @@ struct ColumnInfo {
 // SQLITE_THREADSAFE=2; see .gn).
 class Trace {
  public:
-  static base::StatusOr<std::shared_ptr<Trace>> Load(const std::string& path);
+  // Loads the trace at |path|. Each entry of |sql_packages| is a directory of
+  // PerfettoSQL modules to register first, as with trace_processor_shell's
+  // --add-sql-package: `<dir>[@<package name>]`, the name defaulting to the
+  // directory's.
+  static base::StatusOr<std::shared_ptr<Trace>> Load(
+      const std::string& path,
+      const std::vector<std::string>& sql_packages = {});
   ~Trace();
 
   const std::string& path() const { return path_; }

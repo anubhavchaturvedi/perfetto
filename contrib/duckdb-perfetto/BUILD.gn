@@ -87,6 +87,7 @@ source_set("trace_session") {
   deps = [
     "../../gn:default_deps",
     "../../src/trace_processor:lib",
+    "../../src/trace_processor/shell:sql_packages",
   ]
 }
 

@@ -24,6 +24,8 @@
 //
 // Surface:
 //   ATTACH 'x.pftrace' AS t (TYPE perfetto);       read-only catalog over TP
+//   ATTACH ... (TYPE perfetto, SQL_PACKAGE 'dir')  ... with extra PerfettoSQL
+//                                                  modules (also a LIST)
 //   FROM t.slice WHERE ...                         projection + filter
 //                                                  pushdown into TP
 //   FROM PERFETTO(t) ( <PerfettoSQL> )             block executed entirely
@@ -197,13 +199,32 @@ class VectorSink : public RowSink {
   const std::vector<ColumnType>& types_;
 };
 
-std::shared_ptr<Trace> LoadTraceOrThrow(const std::string& path) {
-  auto t = Trace::Load(path);
+std::shared_ptr<Trace> LoadTraceOrThrow(
+    const std::string& path,
+    const std::vector<std::string>& sql_packages) {
+  auto t = Trace::Load(path, sql_packages);
   if (!t.ok()) {
     throw IOException("perfetto: failed to load %s: %s", path,
                       t.status().message());
   }
   return std::move(*t);
+}
+
+// SQL_PACKAGE (ATTACH) / sql_package (perfetto_query): one directory of
+// PerfettoSQL modules, `<dir>[@<package name>]`, or a LIST of them.
+std::vector<std::string> SqlPackages(const Value& value) {
+  std::vector<std::string> res;
+  if (value.IsNull())
+    return res;
+  if (value.type().id() == LogicalTypeId::LIST) {
+    for (const Value& v : ListValue::GetChildren(value)) {
+      if (!v.IsNull())
+        res.push_back(v.ToString());
+    }
+  } else {
+    res.push_back(value.ToString());
+  }
+  return res;
 }
 
 [[noreturn]] void ThrowReadOnly() {
@@ -523,8 +544,19 @@ unique_ptr<Catalog> PerfettoAttach(optional_ptr<StorageExtensionInfo>,
                                    AttachedDatabase& db,
                                    const string&,
                                    AttachInfo& info,
-                                   AttachOptions&) {
-  return make_uniq<PerfettoCatalog>(db, LoadTraceOrThrow(info.path));
+                                   AttachOptions& options) {
+  std::vector<std::string> sql_packages;
+  for (auto it = options.options.begin(); it != options.options.end();) {
+    if (!StringUtil::CIEquals(it->first, "sql_package")) {
+      ++it;
+      continue;
+    }
+    for (std::string& p : SqlPackages(it->second))
+      sql_packages.push_back(std::move(p));
+    it = options.options.erase(it);
+  }
+  return make_uniq<PerfettoCatalog>(db,
+                                    LoadTraceOrThrow(info.path, sql_packages));
 }
 
 unique_ptr<TransactionManager> PerfettoCreateTransactionManager(
@@ -781,6 +813,8 @@ struct Source {
 struct QueryBindData : public TableFunctionData {
   std::vector<Source> sources;
   std::string sql;
+  // Registered in traces loaded from paths (attached ones have their own).
+  std::vector<std::string> sql_packages;
   bool trace_column = false;
   std::vector<ColumnType> types;
   std::vector<idx_t> out_col;  // TP column -> output column.
@@ -794,6 +828,7 @@ struct QueryBindData : public TableFunctionData {
     auto res = make_uniq<QueryBindData>();
     res->sources = sources;
     res->sql = sql;
+    res->sql_packages = sql_packages;
     res->trace_column = trace_column;
     res->types = types;
     res->out_col = out_col;
@@ -852,6 +887,18 @@ unique_ptr<FunctionData> QueryBind(ClientContext& context,
   }
   if (bind->sources.empty())
     throw InvalidInputException("perfetto_query: no traces matched");
+  auto pkg = input.named_parameters.find("sql_package");
+  if (pkg != input.named_parameters.end()) {
+    bind->sql_packages = SqlPackages(pkg->second);
+    for (const Source& s : bind->sources) {
+      if (s.attached && !bind->sql_packages.empty()) {
+        throw BinderException(
+            "perfetto_query: sql_package only applies to traces loaded from "
+            "paths; give %s its packages with ATTACH ... (SQL_PACKAGE ...)",
+            s.label);
+      }
+    }
+  }
   bind->trace_column = multi;
   auto it = input.named_parameters.find("trace_column");
   if (it != input.named_parameters.end())
@@ -859,7 +906,9 @@ unique_ptr<FunctionData> QueryBind(ClientContext& context,
 
   const Source& s0 = bind->sources[0];
   bind->first = OpenCursorOrThrow(
-      s0.attached ? s0.attached : LoadTraceOrThrow(s0.label), bind->sql);
+      s0.attached ? s0.attached
+                  : LoadTraceOrThrow(s0.label, bind->sql_packages),
+      bind->sql);
   auto types = bind->first->InferTypes(kTypeInferenceRows);
   if (!types.ok())
     throw InvalidInputException("perfetto: %s", types.status().message());
@@ -923,7 +972,9 @@ void QueryFunction(ClientContext&,
         // A later source, or a re-execution of a prepared statement.
         const Source& s = bind.sources[idx];
         local.cursor = OpenCursorOrThrow(
-            s.attached ? s.attached : LoadTraceOrThrow(s.label), bind.sql);
+            s.attached ? s.attached
+                       : LoadTraceOrThrow(s.label, bind.sql_packages),
+            bind.sql);
       }
     }
     VectorSink sink(output, bind.out_col, bind.types);
@@ -1032,6 +1083,7 @@ void LoadInternal(ExtensionLoader& loader) {
                       {LogicalType::ANY, LogicalType::VARCHAR}, QueryFunction,
                       QueryBind, QueryInitGlobal, QueryInitLocal);
   query.named_parameters["trace_column"] = LogicalType::BOOLEAN;
+  query.named_parameters["sql_package"] = LogicalType::ANY;
   loader.RegisterFunction(query);
 
   RegisterIntervalFunctions(loader);

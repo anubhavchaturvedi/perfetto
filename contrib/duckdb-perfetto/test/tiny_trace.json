@@ -1,0 +1,13 @@
+{"traceEvents": [
+  {"ph": "M", "name": "process_name", "pid": 1, "args": {"name": "trainer"}},
+  {"ph": "M", "name": "thread_name", "pid": 1, "tid": 1, "args": {"name": "main"}},
+  {"ph": "M", "name": "thread_name", "pid": 1, "tid": 7, "args": {"name": "stream 7"}},
+  {"ph": "M", "name": "thread_name", "pid": 1, "tid": 8, "args": {"name": "stream 8"}},
+  {"ph": "X", "name": "aten::mm", "pid": 1, "tid": 1, "ts": 0, "dur": 100},
+  {"ph": "X", "name": "aten::add", "pid": 1, "tid": 1, "ts": 10, "dur": 20},
+  {"ph": "X", "name": "gemm_kernel", "pid": 1, "tid": 7, "ts": 0, "dur": 40},
+  {"ph": "X", "name": "gemm_kernel", "pid": 1, "tid": 7, "ts": 50, "dur": 30},
+  {"ph": "X", "name": "Memcpy DtoH (Device -> Pinned)", "pid": 1, "tid": 7, "ts": 85, "dur": 5},
+  {"ph": "X", "name": "ncclDevKernel_AllReduce_Sum_f32", "pid": 1, "tid": 8, "ts": 30, "dur": 40},
+  {"ph": "X", "name": "ncclDevKernel_SendRecv", "pid": 1, "tid": 8, "ts": 90, "dur": 20}
+]}

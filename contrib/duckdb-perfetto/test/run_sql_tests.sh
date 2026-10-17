@@ -14,7 +14,8 @@
 # limitations under the License.
 
 # DuckDB-level tests, run through the stock DuckDB CLI: the SQL checks in
-# interval_functions.sql, plus queries which must fail with a given error.
+# interval_functions.sql and trace_tests.sql, plus queries which must fail
+# with a given error.
 # Usage: contrib/duckdb-perfetto/test/run_sql_tests.sh [duckdb] [extension]
 
 set -uo pipefail
@@ -82,6 +83,8 @@ expect_error() {
 
 echo "interval_functions.sql"
 run_file interval_functions.sql
+echo "trace_tests.sql"
+run_file trace_tests.sql
 
 # The tables of interval_functions.sql, for the error cases.
 sed -n '/^CREATE TABLE a AS/,/^) v(ts, dur, lane, tag);/p' \
@@ -114,6 +117,12 @@ expect_error "SELECT * FROM interval_fill_gaps('SELECT 1 AS x, 2 AS y, 0 AS ts, 
     'all of the PER columns'
 expect_error "SELECT * FROM interval_merge(no_such_table);" \
     'no_such_table does not exist'
+expect_error "ATTACH '__TRACE__' AS x (TYPE perfetto, SQL_PACKAGE '/nonexistent/pkg');" \
+    'Directory /nonexistent/pkg does not exist'
+expect_error "ATTACH '__TRACE__' AS x (TYPE perfetto); SELECT * FROM PERFETTO(x) (INCLUDE PERFETTO MODULE acme.macros; SELECT 1);" \
+    "Package 'acme.macros' not found"
+expect_error "ATTACH '__TRACE__' AS x (TYPE perfetto); SELECT * FROM perfetto_query('x', 'SELECT 1', sql_package := '__PKG__/acme');" \
+    'sql_package only applies to traces loaded from paths'
 
 echo
 echo "$PASSED passed, $FAILED failed"

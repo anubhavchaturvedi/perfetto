@@ -24,6 +24,7 @@
 #include "perfetto/ext/base/string_utils.h"
 #include "perfetto/trace_processor/read_trace.h"
 #include "perfetto/trace_processor/trace_processor.h"
+#include "src/trace_processor/shell/sql_packages.h"
 
 namespace perfetto::duckdb_ext {
 namespace {
@@ -89,11 +90,22 @@ bool IsIdentifier(const std::string& s) {
 Trace::Trace() = default;
 Trace::~Trace() = default;
 
-base::StatusOr<std::shared_ptr<Trace>> Trace::Load(const std::string& path) {
+base::StatusOr<std::shared_ptr<Trace>> Trace::Load(
+    const std::string& path,
+    const std::vector<std::string>& sql_packages) {
   std::shared_ptr<Trace> t(new Trace());
   t->path_ = path;
   trace_processor::Config config;
   t->tp_ = trace_processor::TraceProcessor::CreateInstance(config);
+  // Before the (slow) trace load, so that a bad package fails fast.
+  for (const std::string& package : sql_packages) {
+    base::Status status = trace_processor::IncludeSqlPackage(
+        t->tp_.get(), package, /*allow_override=*/false);
+    if (!status.ok()) {
+      return base::ErrStatus("SQL package %s: %s", package.c_str(),
+                             status.c_message());
+    }
+  }
   RETURN_IF_ERROR(trace_processor::ReadTrace(t->tp_.get(), path.c_str()));
   return t;
 }
