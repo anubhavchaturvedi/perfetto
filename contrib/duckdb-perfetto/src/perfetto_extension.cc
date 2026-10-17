@@ -16,11 +16,11 @@
 
 // PROTOTYPE: DuckDB extension embedding Perfetto's TraceProcessor.
 //
-// This is the only translation unit which includes DuckDB headers. It is
-// built with exceptions and RTTI (DuckDB's C++ API requires both); everything
-// that talks to TraceProcessor lives in trace_session.cc and is built with
-// Perfetto's usual flags. Errors cross that boundary as base::Status, never as
-// exceptions.
+// This file and interval_functions.cc are the only translation units which
+// include DuckDB headers. They are built with exceptions and RTTI (DuckDB's
+// C++ API requires both); everything that talks to TraceProcessor lives in
+// trace_session.cc and is built with Perfetto's usual flags. Errors cross that
+// boundary as base::Status, never as exceptions.
 //
 // Surface:
 //   ATTACH 'x.pftrace' AS t (TYPE perfetto);       read-only catalog over TP
@@ -31,6 +31,9 @@
 //   FROM perfetto_query(source, sql)               what blocks desugar to;
 //                                                  also the bulk entry point
 //                                                  (paths, globs, lists)
+//   FROM interval_merge(rel, per := ...) etc.      interval primitives over
+//                                                  any relation; see
+//                                                  interval_functions.cc
 
 #include <glob.h>
 
@@ -70,6 +73,7 @@
 #include "duckdb/transaction/transaction_manager.hpp"
 
 #include "contrib/duckdb-perfetto/src/block_rewriter.h"
+#include "contrib/duckdb-perfetto/src/interval_functions.h"
 #include "contrib/duckdb-perfetto/src/trace_session.h"
 
 namespace duckdb {
@@ -1029,6 +1033,8 @@ void LoadInternal(ExtensionLoader& loader) {
                       QueryBind, QueryInitGlobal, QueryInitLocal);
   query.named_parameters["trace_column"] = LogicalType::BOOLEAN;
   loader.RegisterFunction(query);
+
+  RegisterIntervalFunctions(loader);
 }
 
 }  // namespace

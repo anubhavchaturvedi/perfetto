@@ -110,7 +110,11 @@ source_set("interval_ops") {
 
 # The only code which includes DuckDB headers.
 source_set("duckdb_glue") {
-  sources = [ "src/perfetto_extension.cc" ]
+  sources = [
+    "src/interval_functions.cc",
+    "src/interval_functions.h",
+    "src/perfetto_extension.cc",
+  ]
 
   # These must match the labels in default_configs exactly, so they can't be
   # relative.
@@ -125,6 +129,7 @@ source_set("duckdb_glue") {
   ]
   deps = [
     ":block_rewriter",
+    ":interval_ops",
     ":trace_session",
     "../../gn:default_deps",
   ]
