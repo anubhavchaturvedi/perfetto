@@ -176,12 +176,14 @@ void WriteColumns(json::JsonArraySerializer& columns,
   }
 }
 
-void WriteFile(json::JsonDictSerializer& file, const PluginDataframe& table) {
+void WriteFile(json::JsonDictSerializer& file,
+               const PluginDataframe& table,
+               int64_t format) {
   DataframeSpec spec = table.dataframe->CreateSpec();
   file.AddString("path", table.name + ".arrow");
   file.AddDict(
       "__exported_table_schema", [&](json::JsonDictSerializer& schema) {
-        schema.AddInt("format", kPerfettoExportFormatVersion);
+        schema.AddInt("format", format);
         schema.AddString("name", table.name);
         schema.AddUint("row_count", table.dataframe->row_count());
         schema.AddArray("columns", [&](json::JsonArraySerializer& columns) {
@@ -191,22 +193,25 @@ void WriteFile(json::JsonDictSerializer& file, const PluginDataframe& table) {
 }
 
 void WriteFiles(json::JsonArraySerializer& files,
-                const std::vector<const PluginDataframe*>& tables) {
+                const std::vector<const PluginDataframe*>& tables,
+                int64_t format) {
   for (const PluginDataframe* table : tables) {
-    files.AppendDict(
-        [&](json::JsonDictSerializer& file) { WriteFile(file, *table); });
+    files.AppendDict([&](json::JsonDictSerializer& file) {
+      WriteFile(file, *table, format);
+    });
   }
 }
 
 void WriteManifest(json::JsonDictSerializer& manifest,
                    const std::vector<const PluginDataframe*>& tables,
-                   const char* writer_version) {
+                   const char* writer_version,
+                   int64_t format) {
   manifest.AddInt("version", 1);
   manifest.AddDict("attributes", [&](json::JsonDictSerializer& attributes) {
     attributes.AddString("perfetto_export_writer_version", writer_version);
   });
   manifest.AddArray("files", [&](json::JsonArraySerializer& files) {
-    WriteFiles(files, tables);
+    WriteFiles(files, tables, format);
   });
 }
 
@@ -214,11 +219,12 @@ void WriteManifest(json::JsonDictSerializer& manifest,
 
 std::string SerializePerfettoExportManifest(
     const std::vector<const PluginDataframe*>& tables,
-    const char* writer_version) {
+    const char* writer_version,
+    int64_t format) {
   return json::SerializeJson([&](json::JsonValueSerializer&& root) {
     std::move(root).WriteDict([&](json::JsonDictSerializer& top) {
       top.AddDict("perfetto_manifest", [&](json::JsonDictSerializer& manifest) {
-        WriteManifest(manifest, tables, writer_version);
+        WriteManifest(manifest, tables, writer_version, format);
       });
     });
   });
@@ -235,14 +241,16 @@ ValidatePerfettoExportTables(
     }
     const TraceManifestState::PerfettoExportTable& table =
         *entry.exported_table_schema;
-    if (table.format != kPerfettoExportFormatVersion) {
+    if (table.format != kPerfettoExportFormatVersion &&
+        table.format != kPerfettoExportCompressedFormatVersion) {
       return base::ErrStatus(
           "perfetto_export: unsupported format version %" PRId64
-          " for table '%s' (this version of trace processor supports version "
-          "%" PRId64
+          " for table '%s' (this version of trace processor supports versions "
+          "%" PRId64 " and %" PRId64
           "). The archive was written by an incompatible version of trace "
           "processor; re-export it from the original trace.",
-          table.format, table.name.c_str(), kPerfettoExportFormatVersion);
+          table.format, table.name.c_str(), kPerfettoExportFormatVersion,
+          kPerfettoExportCompressedFormatVersion);
     }
     if (std::any_of(result.begin(), result.end(),
                     [&](const ResolvedPerfettoExportTable& existing) {

@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <vector>
 
 #include "perfetto/base/build_config.h"
 #include "perfetto/ext/base/utils.h"
@@ -53,12 +54,91 @@ std::unique_ptr<uint8_t, base::FreeDeleter> ZstdCompressor::CompressFully(
   return out;
 }
 
+ZstdStreamCompressor::ZstdStreamCompressor(int level)
+    : cctx_(ZSTD_createCCtx()),
+      staging_(new uint8_t[ZSTD_CStreamOutSize()]),
+      level_(level) {}
+
+ZstdStreamCompressor::~ZstdStreamCompressor() = default;
+
+void ZstdStreamCompressor::Deleter::operator()(ZSTD_CCtx_s* cctx) const {
+  ZSTD_freeCCtx(cctx);
+}
+
+bool ZstdStreamCompressor::BeginFrame(uint64_t size) {
+  if (!cctx_) {
+    return false;
+  }
+  return !ZSTD_isError(ZSTD_CCtx_reset(cctx_.get(), ZSTD_reset_session_only)) &&
+         !ZSTD_isError(ZSTD_CCtx_setParameter(
+             cctx_.get(), ZSTD_c_compressionLevel, level_)) &&
+         !ZSTD_isError(ZSTD_CCtx_setPledgedSrcSize(cctx_.get(), size));
+}
+
+bool ZstdStreamCompressor::Feed(const uint8_t* data,
+                                size_t size,
+                                std::vector<uint8_t>* out) {
+  return Compress(data, size, /*end=*/false, out);
+}
+
+bool ZstdStreamCompressor::EndFrame(std::vector<uint8_t>* out) {
+  return Compress(nullptr, 0, /*end=*/true, out);
+}
+
+bool ZstdStreamCompressor::Compress(const uint8_t* data,
+                                    size_t size,
+                                    bool end,
+                                    std::vector<uint8_t>* out) {
+  ZSTD_inBuffer input{data, size, 0};
+  for (;;) {
+    // Compress into the staging buffer so that only the (much smaller) output
+    // is copied into |out|, rather than zero-filling room for it.
+    ZSTD_outBuffer output{staging_.get(), ZSTD_CStreamOutSize(), 0};
+    size_t remaining = ZSTD_compressStream2(cctx_.get(), &output, &input,
+                                            end ? ZSTD_e_end : ZSTD_e_continue);
+    if (ZSTD_isError(remaining)) {
+      return false;
+    }
+    out->insert(out->end(), staging_.get(), staging_.get() + output.pos);
+    // With ZSTD_e_end, |remaining| counts the output still buffered in the
+    // context. With ZSTD_e_continue, consuming all input is enough.
+    if (end ? remaining == 0 : input.pos == input.size) {
+      return true;
+    }
+  }
+}
+
 #else  // !PERFETTO_ZSTD
 
 // static
 std::unique_ptr<uint8_t, base::FreeDeleter>
 ZstdCompressor::CompressFully(const uint8_t*, size_t, size_t*, int) {
   return nullptr;
+}
+
+ZstdStreamCompressor::ZstdStreamCompressor(int level) : level_(level) {}
+
+ZstdStreamCompressor::~ZstdStreamCompressor() = default;
+
+void ZstdStreamCompressor::Deleter::operator()(ZSTD_CCtx_s*) const {}
+
+bool ZstdStreamCompressor::BeginFrame(uint64_t) {
+  return false;
+}
+
+bool ZstdStreamCompressor::Feed(const uint8_t*, size_t, std::vector<uint8_t>*) {
+  return false;
+}
+
+bool ZstdStreamCompressor::EndFrame(std::vector<uint8_t>*) {
+  return false;
+}
+
+bool ZstdStreamCompressor::Compress(const uint8_t*,
+                                    size_t,
+                                    bool,
+                                    std::vector<uint8_t>*) {
+  return false;
 }
 
 #endif  // PERFETTO_BUILDFLAG(PERFETTO_ZSTD)

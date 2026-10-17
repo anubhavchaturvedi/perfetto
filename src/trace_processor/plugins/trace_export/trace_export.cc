@@ -118,10 +118,12 @@ void RegisterPlugin() {
   base::ignore_result(reg);
 }
 
-base::Status WriteExport(const std::vector<PluginDataframe>& dataframes,
-                         const StringPool& pool,
-                         TraceProcessor::ExportFormat format,
-                         TraceProcessor::ExportOutput* output) {
+base::Status WriteExport(
+    const std::vector<PluginDataframe>& dataframes,
+    const StringPool& pool,
+    TraceProcessor::ExportFormat format,
+    core::dataframe::ArrowSerializer::Compression compression,
+    TraceProcessor::ExportOutput* output) {
   if (!output) {
     return base::ErrStatus("Export output is null");
   }
@@ -142,16 +144,23 @@ base::Status WriteExport(const std::vector<PluginDataframe>& dataframes,
       }
       tables.push_back(&table);
     }
+    bool compressed =
+        compression != core::dataframe::ArrowSerializer::Compression::kNone;
     if (perfetto) {
-      std::string manifest =
-          SerializePerfettoExportManifest(tables, base::GetVersionString());
+      // Compressed members need a reader which decompresses, so they are
+      // declared with a format version which older readers reject.
+      std::string manifest = SerializePerfettoExportManifest(
+          tables, base::GetVersionString(),
+          compressed ? kPerfettoExportCompressedFormatVersion
+                     : kPerfettoExportFormatVersion);
       RETURN_IF_ERROR(tar.AddFile(
           kPerfettoManifestFileName,
           reinterpret_cast<const uint8_t*>(manifest.data()), manifest.size()));
     }
     core::dataframe::ArrowSerializer serializer(
         perfetto ? core::dataframe::ArrowSerializer::IdColumnMode::kOmit
-                 : core::dataframe::ArrowSerializer::IdColumnMode::kInclude);
+                 : core::dataframe::ArrowSerializer::IdColumnMode::kInclude,
+        compression);
     for (const PluginDataframe* table : tables) {
       RETURN_IF_ERROR(WriteArrowTable(&tar, *table, pool, &serializer));
     }

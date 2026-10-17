@@ -46,6 +46,15 @@ constexpr uint8_t kTypeFloatingPoint = 3;
 constexpr uint8_t kTypeUtf8 = 5;
 constexpr int16_t kPrecisionDouble = 2;
 constexpr int16_t kEndiannessLittle = 0;
+// BodyCompression: CompressionType and BodyCompressionMethod values. With the
+// BUFFER method each buffer is compressed separately and prefixed by its
+// uncompressed length as a little-endian int64, or -1 if it is stored
+// uncompressed. Empty buffers stay empty.
+constexpr uint8_t kCompressionLz4Frame = 0;
+constexpr uint8_t kCompressionZstd = 1;
+constexpr uint8_t kBodyCompressionBuffer = 0;
+constexpr uint32_t kCompressedLengthPrefixSize = sizeof(int64_t);
+constexpr int64_t kUncompressedBufferLength = -1;
 
 constexpr uint32_t kArrowAlignment = 64;
 constexpr uint32_t kBitsPerByte = 8;
@@ -105,7 +114,12 @@ namespace record_batch_field {
 constexpr uint32_t kLength = 0;
 constexpr uint32_t kNodes = 1;
 constexpr uint32_t kBuffers = 2;
+constexpr uint32_t kCompression = 3;
 }  // namespace record_batch_field
+namespace body_compression_field {
+constexpr uint32_t kCodec = 0;
+constexpr uint32_t kMethod = 1;
+}  // namespace body_compression_field
 namespace footer_field {
 constexpr uint32_t kVersion = 0;
 constexpr uint32_t kSchema = 1;

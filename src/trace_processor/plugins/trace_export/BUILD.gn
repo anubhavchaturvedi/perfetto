@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import("../../../../gn/perfetto.gni")
+import("../../../../gn/test.gni")
 
 assert(enable_perfetto_trace_processor_sqlite)
 
@@ -42,5 +43,17 @@ source_set("trace_export") {
     "../../util:tar_writer",
     "../../util:trace_blob_view_reader",
     "../../util:trace_type",
+  ]
+}
+
+perfetto_unittest_source_set("unittests") {
+  testonly = true
+  sources = [ "trace_export_unittest.cc" ]
+  deps = [
+    "../..:lib",
+    "../../../../gn:default_deps",
+    "../../../../gn:gtest_and_gmock",
+    "../../../../include/perfetto/trace_processor",
+    "../../../base",
   ]
 }

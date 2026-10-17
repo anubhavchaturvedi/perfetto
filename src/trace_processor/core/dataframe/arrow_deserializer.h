@@ -27,10 +27,11 @@ class TraceBlobViewReader;
 }
 namespace core::dataframe {
 
-// Reads the single-record-batch Arrow layout emitted by ArrowSerializer and
-// returns a newly constructed, finalized dataframe. |spec| supplies the full
-// dataframe schema, including properties which are not represented by Arrow,
-// such as null storage, sort, and duplicate state.
+// Reads the single-record-batch Arrow layout emitted by ArrowSerializer, with
+// or without ZSTD body compression, and returns a newly constructed, finalized
+// dataframe. |spec| supplies the full dataframe schema, including properties
+// which are not represented by Arrow, such as null storage, sort, and
+// duplicate state.
 //
 // This deliberately validates only the supported layout; use a full Arrow
 // implementation when diagnostics for arbitrary Arrow files are required.

@@ -20,8 +20,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "perfetto/ext/base/utils.h"
+
+struct ZSTD_CCtx_s;
 
 namespace perfetto::trace_processor::util {
 
@@ -34,6 +37,42 @@ class ZstdCompressor {
   // nullptr on error or when zstd is not compiled in.
   static std::unique_ptr<uint8_t, base::FreeDeleter>
   CompressFully(const uint8_t* data, size_t len, size_t* out_size, int level);
+};
+
+// Streaming zstd compression of a sequence of frames, each fed in pieces. The
+// compression context is reused across frames. Every method returns false on
+// error, including when zstd is not compiled in.
+class ZstdStreamCompressor {
+ public:
+  explicit ZstdStreamCompressor(int level);
+  ~ZstdStreamCompressor();
+
+  ZstdStreamCompressor(const ZstdStreamCompressor&) = delete;
+  ZstdStreamCompressor& operator=(const ZstdStreamCompressor&) = delete;
+
+  // Starts a frame of exactly |size| uncompressed bytes. The size is recorded
+  // in the frame header.
+  bool BeginFrame(uint64_t size);
+
+  // Compresses |data|, appending the output to |out|.
+  bool Feed(const uint8_t* data, size_t size, std::vector<uint8_t>* out);
+
+  // Ends the frame, appending the remaining output to |out|.
+  bool EndFrame(std::vector<uint8_t>* out);
+
+ private:
+  struct Deleter {
+    void operator()(ZSTD_CCtx_s*) const;
+  };
+
+  bool Compress(const uint8_t* data,
+                size_t size,
+                bool end,
+                std::vector<uint8_t>* out);
+
+  std::unique_ptr<ZSTD_CCtx_s, Deleter> cctx_;
+  std::unique_ptr<uint8_t[]> staging_;
+  [[maybe_unused]] int level_;
 };
 
 }  // namespace perfetto::trace_processor::util

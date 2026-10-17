@@ -32,11 +32,18 @@ namespace perfetto::trace_processor::trace_export {
 // internal to Perfetto. Loading it in a different version may work but is not
 // guaranteed.
 constexpr char kPerfettoManifestFileName[] = "perfetto_manifest.json";
+// Versions of the table serialization. Version 2 members may use Arrow body
+// compression, which version 1 readers cannot decode, so uncompressed archives
+// keep declaring version 1.
 constexpr int64_t kPerfettoExportFormatVersion = 1;
+constexpr int64_t kPerfettoExportCompressedFormatVersion = 2;
 
+// Serializes the manifest declaring |tables| as members of table format
+// version |format|.
 std::string SerializePerfettoExportManifest(
     const std::vector<const PluginDataframe*>& tables,
-    const char* writer_version);
+    const char* writer_version,
+    int64_t format);
 
 struct ResolvedPerfettoExportTable {
   const TraceManifestState::FileEntry* entry = nullptr;

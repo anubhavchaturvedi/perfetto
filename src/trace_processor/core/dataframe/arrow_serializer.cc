@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,6 +38,7 @@
 #include "src/trace_processor/core/dataframe/types.h"
 #include "src/trace_processor/core/util/bit_vector.h"
 #include "src/trace_processor/util/flatbuffer_writer.h"
+#include "src/trace_processor/util/zstd_compressor.h"
 
 namespace perfetto::trace_processor::core::dataframe {
 
@@ -54,6 +56,8 @@ struct ArrowSerializer::DictionaryPlan {
   uint64_t body_size = 0;
   std::vector<arrow_internal::ArrowBuffer> buffers;
   std::vector<uint8_t> message;
+  // The compressed body, when compressing.
+  std::vector<uint8_t> compressed_body;
 };
 
 namespace {
@@ -61,6 +65,10 @@ namespace {
 using W = util::FlatBufferWriter;
 
 using namespace arrow_internal;
+
+// zstd's default level, which compresses archives about 20x at hundreds of
+// MB/s.
+constexpr int kZstdLevel = 3;
 
 base::StatusOr<ArrowBuffer> AddBuffer(uint64_t length, uint64_t* cursor) {
   constexpr uint64_t kMax =
@@ -273,29 +281,45 @@ W::Offset BuildMessage(W& w,
   return w.EndTable();
 }
 
+W::Offset BuildBodyCompression(W& w) {
+  w.StartTable();
+  w.FieldU8(body_compression_field::kCodec, kCompressionZstd);
+  w.FieldU8(body_compression_field::kMethod, kBodyCompressionBuffer);
+  return w.EndTable();
+}
+
 W::Offset BuildRecordBatch(W& w,
                            uint32_t rows,
                            const std::vector<FieldNode>& nodes,
-                           const std::vector<ArrowBuffer>& buffers) {
+                           const std::vector<ArrowBuffer>& buffers,
+                           bool compressed) {
   auto buffer_vector =
       w.WriteVecStruct(buffers.data(), sizeof(ArrowBuffer),
                        static_cast<uint32_t>(buffers.size()), alignof(int64_t));
   auto node_vector =
       w.WriteVecStruct(nodes.data(), sizeof(FieldNode),
                        static_cast<uint32_t>(nodes.size()), alignof(int64_t));
+  W::Offset compression;
+  if (compressed) {
+    compression = BuildBodyCompression(w);
+  }
   w.StartTable();
   w.FieldI64(record_batch_field::kLength, rows);
   w.FieldOffset(record_batch_field::kNodes, node_vector);
   w.FieldOffset(record_batch_field::kBuffers, buffer_vector);
+  if (compressed) {
+    w.FieldOffset(record_batch_field::kCompression, compression);
+  }
   return w.EndTable();
 }
 
 W::Offset BuildDictionaryBatch(W& w,
                                int64_t id,
                                uint32_t length,
-                               const std::vector<ArrowBuffer>& buffers) {
+                               const std::vector<ArrowBuffer>& buffers,
+                               bool compressed) {
   std::vector<FieldNode> nodes{FieldNode{length, 0}};
-  auto data = BuildRecordBatch(w, length, nodes, buffers);
+  auto data = BuildRecordBatch(w, length, nodes, buffers, compressed);
   w.StartTable();
   w.FieldI64(dictionary_batch_field::kId, id);
   w.FieldOffset(dictionary_batch_field::kData, data);
@@ -405,10 +429,120 @@ base::Status WriteNumericBuffer(uint32_t rows,
   return output.Finish();
 }
 
+// Re-encodes an uncompressed body, streamed by the same code which writes
+// uncompressed files, in the BUFFER compression layout. Each non-empty buffer
+// becomes its uncompressed length followed by one zstd frame, padded to the
+// Arrow alignment. The padding between the input buffers is dropped and empty
+// buffers stay empty.
+class BodyCompressor {
+ public:
+  // |layout| is the uncompressed layout of the body streamed to Write().
+  BodyCompressor(util::ZstdStreamCompressor* zstd,
+                 const std::vector<ArrowBuffer>& layout,
+                 std::vector<uint8_t>* body)
+      : zstd_(zstd), layout_(layout), body_(body) {}
+
+  base::Status Write(const uint8_t* data, size_t size) {
+    while (size) {
+      SkipEmptyBuffers();
+      if (next_ == layout_.size()) {
+        // Trailing padding.
+        position_ += size;
+        return base::OkStatus();
+      }
+      const ArrowBuffer& buffer = layout_[next_];
+      auto start = static_cast<uint64_t>(buffer.offset);
+      uint64_t end = start + static_cast<uint64_t>(buffer.length);
+      if (position_ < start) {
+        // Padding after the previous buffer.
+        auto skipped =
+            static_cast<size_t>(std::min<uint64_t>(size, start - position_));
+        Advance(skipped, &data, &size);
+        continue;
+      }
+      if (position_ == start) {
+        RETURN_IF_ERROR(BeginBuffer(buffer));
+      }
+      auto fed = static_cast<size_t>(std::min<uint64_t>(size, end - position_));
+      if (!zstd_->Feed(data, fed, body_)) {
+        return CompressionError();
+      }
+      Advance(fed, &data, &size);
+      if (position_ == end) {
+        RETURN_IF_ERROR(EndBuffer());
+      }
+    }
+    return base::OkStatus();
+  }
+
+  // Returns the compressed layout, once the whole uncompressed body of
+  // |size| bytes has been written.
+  base::StatusOr<std::vector<ArrowBuffer>> Finish(uint64_t size) {
+    SkipEmptyBuffers();
+    if (next_ != layout_.size() || position_ != size) {
+      return base::ErrStatus("Arrow body size does not match its layout");
+    }
+    return std::move(compressed_layout_);
+  }
+
+ private:
+  static base::Status CompressionError() {
+    return base::ErrStatus(
+        "zstd compression failed (or zstd is not supported "
+        "by this build)");
+  }
+
+  void Advance(size_t bytes, const uint8_t** data, size_t* size) {
+    position_ += bytes;
+    *data += bytes;
+    *size -= bytes;
+  }
+
+  void SkipEmptyBuffers() {
+    while (next_ < layout_.size() && layout_[next_].length == 0) {
+      compressed_layout_.push_back({static_cast<int64_t>(body_->size()), 0});
+      ++next_;
+    }
+  }
+
+  base::Status BeginBuffer(const ArrowBuffer& buffer) {
+    buffer_start_ = body_->size();
+    int64_t length = buffer.length;
+    const auto* prefix = reinterpret_cast<const uint8_t*>(&length);
+    body_->insert(body_->end(), prefix, prefix + sizeof(length));
+    return zstd_->BeginFrame(static_cast<uint64_t>(length))
+               ? base::OkStatus()
+               : CompressionError();
+  }
+
+  base::Status EndBuffer() {
+    if (!zstd_->EndFrame(body_)) {
+      return CompressionError();
+    }
+    compressed_layout_.push_back(
+        {static_cast<int64_t>(buffer_start_),
+         static_cast<int64_t>(body_->size() - buffer_start_)});
+    body_->resize(static_cast<size_t>(AlignToArrow(body_->size())), 0);
+    ++next_;
+    return base::OkStatus();
+  }
+
+  util::ZstdStreamCompressor* zstd_;
+  const std::vector<ArrowBuffer>& layout_;
+  std::vector<uint8_t>* body_;
+  std::vector<ArrowBuffer> compressed_layout_;
+  // Position in the uncompressed body.
+  uint64_t position_ = 0;
+  // Index in |layout_| of the buffer being written or next to start.
+  size_t next_ = 0;
+  size_t buffer_start_ = 0;
+};
+
 }  // namespace
 
-ArrowSerializer::ArrowSerializer(IdColumnMode id_column_mode)
-    : id_column_mode_(id_column_mode) {}
+ArrowSerializer::ArrowSerializer(IdColumnMode id_column_mode,
+                                 Compression compression)
+    : id_column_mode_(id_column_mode), compression_(compression) {}
 
 ArrowSerializer::~ArrowSerializer() = default;
 
@@ -420,6 +554,8 @@ void ArrowSerializer::Reset() {
   header_.clear();
   batch_header_.clear();
   trailer_.clear();
+  compressed_body_.clear();
+  compressed_body_.shrink_to_fit();
 }
 
 // Collects the distinct StringPool ids of a column in first-appearance order
@@ -549,13 +685,14 @@ base::Status ArrowSerializer::BuildFileFraming(const BodyPlan& plan) {
     w.FieldOffset(schema_field::kFields, field_vector);
     return w.EndTable();
   };
+  bool compressed = compression_ != Compression::kNone;
   W schema_writer;
   std::vector<uint8_t> schema = FinishFlatbuffer(
       &schema_writer, BuildMessage(schema_writer, kHeaderSchema,
                                    build_schema(schema_writer), int64_t{}));
   W batch_writer;
-  auto batch =
-      BuildRecordBatch(batch_writer, plan.rows, plan.nodes, plan.buffers);
+  auto batch = BuildRecordBatch(batch_writer, plan.rows, plan.nodes,
+                                plan.buffers, compressed);
   std::vector<uint8_t> batch_metadata = FinishFlatbuffer(
       &batch_writer, BuildMessage(batch_writer, kHeaderRecordBatch, batch,
                                   static_cast<int64_t>(plan.size)));
@@ -581,10 +718,11 @@ base::Status ArrowSerializer::BuildFileFraming(const BodyPlan& plan) {
     W writer;
     auto values = static_cast<uint32_t>(dictionary.values.size());
     std::vector<uint8_t> dictionary_metadata = FinishFlatbuffer(
-        &writer, BuildMessage(writer, kHeaderDictionaryBatch,
-                              BuildDictionaryBatch(writer, i, values,
-                                                   dictionary.buffers),
-                              static_cast<int64_t>(dictionary.body_size)));
+        &writer,
+        BuildMessage(writer, kHeaderDictionaryBatch,
+                     BuildDictionaryBatch(writer, i, values, dictionary.buffers,
+                                          compressed),
+                     static_cast<int64_t>(dictionary.body_size)));
     auto size =
         static_cast<uint32_t>(PaddedMetadataSize(dictionary_metadata.size()));
     if (size > maximum_metadata_size) {
@@ -633,6 +771,9 @@ base::StatusOr<size_t> ArrowSerializer::Prepare(const Dataframe& dataframe,
 
   BodyPlan plan;
   RETURN_IF_ERROR(PlanBody(dataframe, pool, &plan));
+  if (compression_ != Compression::kNone) {
+    RETURN_IF_ERROR(CompressBodies(dataframe, pool, &plan));
+  }
   RETURN_IF_ERROR(BuildFileFraming(plan));
 
   // Phase 3: validate the final platform-sized result and record the objects
@@ -654,6 +795,36 @@ base::StatusOr<size_t> ArrowSerializer::Prepare(const Dataframe& dataframe,
   prepared_string_pool_ = &pool;
   prepared_mutations_ = dataframe.mutations();
   return static_cast<size_t>(total);
+}
+
+// Compresses the dictionary and record-batch bodies laid out by PlanBody() by
+// streaming them through the uncompressed writers, and replaces their layouts
+// with the compressed ones.
+base::Status ArrowSerializer::CompressBodies(const Dataframe& dataframe,
+                                             const StringPool& pool,
+                                             BodyPlan* plan) {
+  PERFETTO_CHECK(compression_ == Compression::kZstd);
+  if (!zstd_) {
+    zstd_ = std::make_unique<util::ZstdStreamCompressor>(kZstdLevel);
+  }
+  for (DictionaryPlan& dictionary : dictionaries_) {
+    BodyCompressor compressor(zstd_.get(), dictionary.buffers,
+                              &dictionary.compressed_body);
+    RETURN_IF_ERROR(WriteDictionary(dictionary, pool,
+                                    [&](const uint8_t* data, size_t size) {
+                                      return compressor.Write(data, size);
+                                    }));
+    ASSIGN_OR_RETURN(dictionary.buffers,
+                     compressor.Finish(dictionary.body_size));
+    dictionary.body_size = dictionary.compressed_body.size();
+  }
+  BodyCompressor compressor(zstd_.get(), plan->buffers, &compressed_body_);
+  RETURN_IF_ERROR(WriteBody(dataframe, [&](const uint8_t* data, size_t size) {
+    return compressor.Write(data, size);
+  }));
+  ASSIGN_OR_RETURN(plan->buffers, compressor.Finish(plan->size));
+  plan->size = compressed_body_.size();
+  return base::OkStatus();
 }
 
 base::Status ArrowSerializer::WriteDictionary(const DictionaryPlan& dictionary,
@@ -735,14 +906,25 @@ base::Status ArrowSerializer::Write(const Dataframe& dataframe,
       prepared_mutations_ != dataframe.mutations()) {
     return base::ErrStatus("Dataframe changed after Arrow Prepare");
   }
+  bool compressed = compression_ != Compression::kNone;
   RETURN_IF_ERROR(Emit(write, header_.data(), header_.size()));
   for (const DictionaryPlan& dictionary : dictionaries_) {
     RETURN_IF_ERROR(
         Emit(write, dictionary.message.data(), dictionary.message.size()));
-    RETURN_IF_ERROR(WriteDictionary(dictionary, pool, write));
+    if (compressed) {
+      RETURN_IF_ERROR(Emit(write, dictionary.compressed_body.data(),
+                           dictionary.compressed_body.size()));
+    } else {
+      RETURN_IF_ERROR(WriteDictionary(dictionary, pool, write));
+    }
   }
   RETURN_IF_ERROR(Emit(write, batch_header_.data(), batch_header_.size()));
-  RETURN_IF_ERROR(WriteBody(dataframe, write));
+  if (compressed) {
+    RETURN_IF_ERROR(
+        Emit(write, compressed_body_.data(), compressed_body_.size()));
+  } else {
+    RETURN_IF_ERROR(WriteBody(dataframe, write));
+  }
   return Emit(write, trailer_.data(), trailer_.size());
 }
 

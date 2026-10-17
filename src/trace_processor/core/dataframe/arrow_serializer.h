@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -30,7 +31,10 @@
 
 namespace perfetto::trace_processor {
 class StringPool;
+namespace util {
+class ZstdStreamCompressor;
 }
+}  // namespace perfetto::trace_processor
 
 namespace perfetto::trace_processor::core::dataframe {
 
@@ -51,20 +55,36 @@ class ArrowSerializer {
     kInclude,
   };
 
+  // How the buffers of the dictionary and record batches are encoded.
+  enum class Compression {
+    // Buffers are stored as they are, so readers can map them without a copy.
+    kNone,
+    // Arrow IPC BodyCompression with the ZSTD codec and the BUFFER method:
+    // each buffer is a separate zstd frame prefixed by its uncompressed length.
+    // Full Arrow implementations read this too. Because Arrow places buffer
+    // lengths before buffer contents, Prepare() compresses the bodies into
+    // memory and Write() emits them.
+    kZstd,
+  };
+
   using WriteFn = std::function<base::Status(const uint8_t*, size_t)>;
 
-  explicit ArrowSerializer(IdColumnMode = IdColumnMode::kOmit);
+  explicit ArrowSerializer(IdColumnMode = IdColumnMode::kOmit,
+                           Compression = Compression::kNone);
   ~ArrowSerializer();
 
   // Computes Arrow buffer metadata and the exact output size for a finalized
   // dataframe. Arrow places buffer lengths before buffer contents, so
   // variable-width strings must be measured here before Write() can stream the
-  // file. This retains only metadata; it does not materialize column contents.
+  // file. Without compression this retains only metadata; it does not
+  // materialize column contents. With compression it retains the compressed
+  // bodies.
   base::StatusOr<size_t> Prepare(const Dataframe&, const StringPool&);
 
   // Streams the dataframe prepared by the preceding Prepare() call using
   // bounded scratch memory. Column contents are not materialized as a complete
-  // Arrow body. The dataframe and string pool must not change between calls.
+  // uncompressed Arrow body. The dataframe and string pool must not change
+  // between calls.
   base::Status Write(const Dataframe&, const StringPool&, const WriteFn&);
 
  private:
@@ -80,6 +100,7 @@ class ArrowSerializer {
 
   void Reset();
   base::Status PlanBody(const Dataframe&, const StringPool&, BodyPlan*);
+  base::Status CompressBodies(const Dataframe&, const StringPool&, BodyPlan*);
   base::Status PlanDictionary(uint32_t rows,
                               const Column&,
                               const StringPool&,
@@ -103,11 +124,15 @@ class ArrowSerializer {
   std::vector<PreparedColumn> prepared_columns_;
   std::vector<DictionaryPlan> dictionaries_;
   FlexVector<uint8_t> scratch_;
+  // The compressed record-batch body, when compressing.
+  std::vector<uint8_t> compressed_body_;
+  std::unique_ptr<util::ZstdStreamCompressor> zstd_;
 
   const Dataframe* prepared_dataframe_ = nullptr;
   const StringPool* prepared_string_pool_ = nullptr;
   uint64_t prepared_mutations_ = 0;
   IdColumnMode id_column_mode_;
+  Compression compression_;
 };
 
 }  // namespace perfetto::trace_processor::core::dataframe

@@ -78,6 +78,8 @@ struct SerializedRecordBatch {
   size_t body_offset;
   util::FlatBufferScalarVec<FieldNode> nodes;
   util::FlatBufferScalarVec<ArrowBuffer> buffers;
+  // The BodyCompression codec, if the batch is compressed.
+  std::optional<uint8_t> codec;
 };
 
 size_t FooterOffset(const std::vector<uint8_t>& bytes) {
@@ -133,11 +135,16 @@ std::optional<SerializedRecordBatch> ReadBatch(
   if (!record_batch) {
     return std::nullopt;
   }
+  auto compression = record_batch.Table(record_batch_field::kCompression);
   return SerializedRecordBatch{
-      block, record_batch.Scalar<int64_t>(record_batch_field::kLength),
+      block,
+      record_batch.Scalar<int64_t>(record_batch_field::kLength),
       message_offset + static_cast<uint32_t>(block.metadata_length),
       record_batch.VecScalar<FieldNode>(record_batch_field::kNodes),
-      record_batch.VecScalar<ArrowBuffer>(record_batch_field::kBuffers)};
+      record_batch.VecScalar<ArrowBuffer>(record_batch_field::kBuffers),
+      compression ? std::make_optional(compression.Scalar<uint8_t>(
+                        body_compression_field::kCodec, kCompressionLz4Frame))
+                  : std::nullopt};
 }
 
 std::optional<SerializedRecordBatch> ReadRecordBatch(
@@ -190,6 +197,87 @@ TEST(ArrowSerializerTest, WritesArrowFileMagic) {
   EXPECT_EQ(memcmp(bytes.data() + bytes.size() - kArrowMagicSize, kArrowMagic,
                    kArrowMagicSize),
             0);
+}
+
+TEST(ArrowSerializerTest, DoesNotCompressByDefault) {
+  StringPool pool;
+  auto dataframe = MakeDataframe(kStringNonNull, &pool, pool.InternString("a"));
+  std::vector<uint8_t> bytes = Serialize(dataframe, pool);
+  auto batch = ReadRecordBatch(bytes);
+  auto dictionary = ReadDictionaryBatch(bytes, 0);
+  ASSERT_TRUE(batch.has_value());
+  ASSERT_TRUE(dictionary.has_value());
+  EXPECT_FALSE(batch->codec.has_value());
+  EXPECT_FALSE(dictionary->codec.has_value());
+}
+
+TEST(ArrowSerializerTest, ZstdCompressesEachBuffer) {
+  using namespace arrow_internal;
+  constexpr uint32_t kZstdMagic = 0xFD2FB528;
+  StringPool pool;
+  auto dataframe =
+      MakeDataframe(kStringNonNull, &pool, pool.InternString("a"),
+                    pool.InternString("bb"), pool.InternString("a"));
+  std::vector<uint8_t> bytes =
+      Serialize(dataframe, pool, ArrowSerializer::IdColumnMode::kOmit,
+                ArrowSerializer::Compression::kZstd);
+
+  // The record batch: an empty validity buffer, which stays empty, and the
+  // dictionary indices as a length-prefixed zstd frame.
+  auto batch = ReadRecordBatch(bytes);
+  ASSERT_TRUE(batch.has_value());
+  EXPECT_EQ(batch->codec, std::make_optional(kCompressionZstd));
+  ASSERT_EQ(batch->buffers.size(), 2u);
+  EXPECT_EQ(batch->buffers[0].length, 0);
+  ArrowBuffer indices = batch->buffers[1];
+  EXPECT_EQ(indices.offset % kArrowAlignment, 0);
+  const uint8_t* data =
+      bytes.data() + batch->body_offset + static_cast<size_t>(indices.offset);
+  EXPECT_EQ(Load<int64_t>(data, 0), 3 * int64_t{sizeof(int32_t)});
+  EXPECT_EQ(Load<uint32_t>(data + sizeof(int64_t), 0), kZstdMagic);
+  EXPECT_EQ(batch->block.body_length % kArrowAlignment, 0);
+
+  // The dictionary batch: offsets and string bytes are compressed too.
+  auto dictionary = ReadDictionaryBatch(bytes, 0);
+  ASSERT_TRUE(dictionary.has_value());
+  EXPECT_EQ(dictionary->codec, std::make_optional(kCompressionZstd));
+  ASSERT_EQ(dictionary->buffers.size(), 3u);
+  EXPECT_EQ(dictionary->buffers[0].length, 0);
+  for (uint32_t i = 1; i < 3; ++i) {
+    ArrowBuffer buffer = dictionary->buffers[i];
+    const uint8_t* buffer_data = bytes.data() + dictionary->body_offset +
+                                 static_cast<size_t>(buffer.offset);
+    EXPECT_EQ(Load<uint32_t>(buffer_data + sizeof(int64_t), 0), kZstdMagic);
+  }
+  // Offsets of two values ("a", "bb") and their three bytes.
+  const uint8_t* offsets = bytes.data() + dictionary->body_offset +
+                           static_cast<size_t>(dictionary->buffers[1].offset);
+  const uint8_t* strings = bytes.data() + dictionary->body_offset +
+                           static_cast<size_t>(dictionary->buffers[2].offset);
+  EXPECT_EQ(Load<int64_t>(offsets, 0), 3 * int64_t{sizeof(int32_t)});
+  EXPECT_EQ(Load<int64_t>(strings, 0), 3);
+}
+
+TEST(ArrowSerializerTest, ZstdPrepareReportsExactSize) {
+  StringPool pool;
+  auto dataframe = MakeDataframe(kUint32NonNull, &pool, uint32_t{1},
+                                 uint32_t{2}, uint32_t{3});
+  dataframe.Finalize();
+  ArrowSerializer serializer(ArrowSerializer::IdColumnMode::kOmit,
+                             ArrowSerializer::Compression::kZstd);
+  // Serialize() checks Write() emits exactly the size Prepare() reported; do
+  // it twice to check the compressed state is reset between files.
+  for (int i = 0; i < 2; ++i) {
+    auto size = serializer.Prepare(dataframe, pool);
+    ASSERT_OK(size);
+    size_t written = 0;
+    ASSERT_OK(
+        serializer.Write(dataframe, pool, [&](const uint8_t*, size_t chunk) {
+          written += chunk;
+          return base::OkStatus();
+        }));
+    EXPECT_EQ(written, *size);
+  }
 }
 
 TEST(ArrowSerializerTest, WritesPrimitiveBuffer) {

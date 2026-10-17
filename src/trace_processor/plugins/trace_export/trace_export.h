@@ -21,6 +21,7 @@
 
 #include "perfetto/base/status.h"
 #include "perfetto/trace_processor/trace_processor.h"
+#include "src/trace_processor/core/dataframe/arrow_serializer.h"
 #include "src/trace_processor/core/plugin/registration.h"
 
 namespace perfetto::trace_processor {
@@ -37,11 +38,14 @@ void RegisterPlugin();
 // consumers and cannot be loaded back into Trace Processor. kPerfetto adds the
 // internal manifest that lets a fresh instance from the same version reload
 // those tables; loading it in a different version may work but is not
-// guaranteed.
-base::Status WriteExport(const std::vector<PluginDataframe>& dataframes,
-                         const StringPool& pool,
-                         TraceProcessor::ExportFormat format,
-                         TraceProcessor::ExportOutput* output);
+// guaranteed. |compression| applies to the Arrow members of both formats; the
+// default, kNone, keeps the output byte-for-byte unchanged and mappable.
+base::Status WriteExport(
+    const std::vector<PluginDataframe>& dataframes,
+    const StringPool& pool,
+    TraceProcessor::ExportFormat format,
+    core::dataframe::ArrowSerializer::Compression compression,
+    TraceProcessor::ExportOutput* output);
 
 }  // namespace perfetto::trace_processor::trace_export
 

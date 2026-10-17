@@ -41,9 +41,11 @@ inline std::vector<uint8_t> Serialize(
     Dataframe& dataframe,
     const StringPool& pool,
     ArrowSerializer::IdColumnMode id_column_mode =
-        ArrowSerializer::IdColumnMode::kOmit) {
+        ArrowSerializer::IdColumnMode::kOmit,
+    ArrowSerializer::Compression compression =
+        ArrowSerializer::Compression::kNone) {
   dataframe.Finalize();
-  ArrowSerializer serializer(id_column_mode);
+  ArrowSerializer serializer(id_column_mode, compression);
   auto prepared_size = serializer.Prepare(dataframe, pool);
   EXPECT_OK(prepared_size);
   if (!prepared_size.ok()) {
@@ -95,9 +97,15 @@ Dataframe MakeDataframe(const Spec& spec,
 }
 
 template <typename Spec>
-Dataframe RoundTrip(const Spec& spec, Dataframe& source, StringPool* pool) {
-  std::vector<uint8_t> bytes = Serialize(source, *pool);
-  auto result = Deserialize(bytes, pool, source.CreateSpec());
+Dataframe RoundTrip(const Spec& spec,
+                    Dataframe& source,
+                    StringPool* pool,
+                    ArrowSerializer::Compression compression =
+                        ArrowSerializer::Compression::kNone,
+                    size_t chunk_size = 0) {
+  std::vector<uint8_t> bytes = Serialize(
+      source, *pool, ArrowSerializer::IdColumnMode::kOmit, compression);
+  auto result = Deserialize(bytes, pool, source.CreateSpec(), chunk_size);
   EXPECT_OK(result);
   return result.ok() ? std::move(*result)
                      : Dataframe::CreateFromTypedSpec(spec, pool);

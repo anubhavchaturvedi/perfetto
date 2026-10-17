@@ -54,7 +54,11 @@ Supported formats:
 The exact contents exported are defined by the selected format.
 
 The format is the first positional argument, and -o specifies the output
-path.)";
+path.
+
+The Arrow members of perfetto and arrow_tar exports are stored uncompressed.
+The developer flags --dev --dev-flag export-compression=zstd compress each
+Arrow buffer with zstd (Arrow IPC body compression) instead.)";
 }
 
 std::vector<FlagSpec> ExportSubcommand::GetFlags() {

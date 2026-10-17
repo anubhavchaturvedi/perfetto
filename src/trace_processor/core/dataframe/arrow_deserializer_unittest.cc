@@ -17,9 +17,12 @@
 #include "src/trace_processor/core/dataframe/arrow_deserializer.h"
 #include "src/trace_processor/core/dataframe/arrow_test_utils.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "perfetto/base/status.h"
@@ -28,6 +31,7 @@
 #include "perfetto/trace_processor/trace_blob_view.h"
 #include "src/base/test/status_matchers.h"
 #include "src/trace_processor/containers/string_pool.h"
+#include "src/trace_processor/core/dataframe/arrow_serializer.h"
 #include "src/trace_processor/core/dataframe/dataframe.h"
 #include "src/trace_processor/core/dataframe/specs.h"
 #include "src/trace_processor/core/dataframe/typed_cursor.h"
@@ -704,6 +708,155 @@ TEST(ArrowDeserializerTest, RejectsGarbageInput) {
   std::vector<uint8_t> bytes(256, 0xCD);
   auto dst = Dataframe::CreateFromTypedSpec(kUint32NonNull, &pool);
   EXPECT_THAT(Deserialize(bytes, &pool, dst.CreateSpec()), IsError());
+}
+
+// --- Arrow body compression --------------------------------------------------
+
+constexpr auto kZstd = ArrowSerializer::Compression::kZstd;
+constexpr auto kOmitIds = ArrowSerializer::IdColumnMode::kOmit;
+
+inline constexpr auto kAllStorage = CreateTypedDataframeSpec(
+    {"_auto_id", "u32", "i64", "f64", "str", "str_sparse", "i32"},
+    CreateTypedColumnSpec(Id{}, NonNull{}, IdSorted{}, NoDuplicates{}),
+    CreateTypedColumnSpec(Uint32{}, NonNull{}, Unsorted{}),
+    CreateTypedColumnSpec(Int64{}, SparseNullWithPopcountAlways{}, Unsorted{}),
+    CreateTypedColumnSpec(Double{}, DenseNull{}, Unsorted{}),
+    CreateTypedColumnSpec(String{}, NonNull{}, Unsorted{}),
+    CreateTypedColumnSpec(String{}, SparseNull{}, Unsorted{}),
+    CreateTypedColumnSpec(Int32{},
+                          SparseNullWithPopcountUntilFinalization{},
+                          Unsorted{}));
+
+Dataframe MakeAllStorageDataframe(StringPool* pool, uint32_t rows) {
+  auto df = Dataframe::CreateFromTypedSpec(kAllStorage, pool);
+  for (uint32_t i = 0; i < rows; ++i) {
+    auto str =
+        pool->InternString(base::StringView("value " + std::to_string(i % 10)));
+    auto other =
+        pool->InternString(base::StringView("other " + std::to_string(i % 3)));
+    df.InsertUnchecked(
+        kAllStorage, std::monostate{}, i % 7,
+        i % 3 ? std::make_optional<int64_t>(int64_t{i} * 1000) : std::nullopt,
+        i % 5 ? std::make_optional(i * 0.5) : std::nullopt, str,
+        i % 4 ? std::make_optional(other) : std::nullopt,
+        i % 2 ? std::make_optional(static_cast<int32_t>(i)) : std::nullopt);
+  }
+  return df;
+}
+
+TEST(ArrowDeserializerTest, ZstdRoundTripAllStorageTypes) {
+  StringPool pool;
+  Dataframe src = MakeAllStorageDataframe(&pool, 1000);
+  std::vector<uint8_t> uncompressed = Serialize(src, pool);
+  std::vector<uint8_t> compressed = Serialize(src, pool, kOmitIds, kZstd);
+  EXPECT_LT(compressed.size(), uncompressed.size());
+
+  // Small chunks split the compressed frames across input pieces.
+  for (size_t chunk_size : {size_t{0}, size_t{7}}) {
+    auto dst = Deserialize(compressed, &pool, src.CreateSpec(), chunk_size);
+    ASSERT_OK(dst);
+    // Same pool, same values: the uncompressed encodings are identical.
+    EXPECT_EQ(Serialize(*dst, pool), uncompressed);
+  }
+}
+
+TEST(ArrowDeserializerTest, ZstdRoundTripEmptyAndIdOnlyDataframes) {
+  StringPool pool;
+  auto empty = Dataframe::CreateFromTypedSpec(kMultiColumn, &pool);
+  EXPECT_EQ(RoundTrip(kMultiColumn, empty, &pool, kZstd).row_count(), 0u);
+
+  auto ids = Dataframe::CreateFromTypedSpec(kIdOnly, &pool);
+  ids.InsertUnchecked(kIdOnly, std::monostate{});
+  ids.InsertUnchecked(kIdOnly, std::monostate{});
+  EXPECT_EQ(RoundTrip(kIdOnly, ids, &pool, kZstd).row_count(), 2u);
+}
+
+TEST(ArrowDeserializerTest, ZstdRoundTripAllNullSparseColumn) {
+  StringPool pool;
+  auto src = MakeDataframe(kInt64SparsePopcountAlways, &pool,
+                           std::optional<int64_t>{}, std::optional<int64_t>{});
+  auto dst = RoundTrip(kInt64SparsePopcountAlways, src, &pool, kZstd);
+  ASSERT_EQ(dst.row_count(), 2u);
+  EXPECT_FALSE(
+      (dst.GetCellUnchecked<1>(kInt64SparsePopcountAlways, 1)).has_value());
+}
+
+// Returns the values buffer of a single non-null column file, and the file
+// offset of the record-batch body.
+std::pair<TestArrowBuffer, size_t> ValuesBuffer(std::vector<uint8_t>* bytes) {
+  TestBlock block = ReadBlock(*bytes);
+  auto record_batch = MutableRecordBatch(bytes);
+  TestArrowBuffer values;
+  memcpy(&values,
+         MutableVectorData(bytes, record_batch, 2) + sizeof(TestArrowBuffer),
+         sizeof(values));
+  return {values, static_cast<size_t>(block.offset) +
+                      static_cast<size_t>(block.metadata_length)};
+}
+
+TEST(ArrowDeserializerTest, ZstdAcceptsBufferStoredUncompressed) {
+  StringPool pool;
+  auto src = MakeDataframe(kUint32NonNull, &pool, uint32_t{10}, uint32_t{20});
+  std::vector<uint8_t> bytes = Serialize(src, pool, kOmitIds, kZstd);
+
+  // Rewrite the values buffer in place as stored uncompressed: a length of -1
+  // followed by the raw values.
+  auto [values, body] = ValuesBuffer(&bytes);
+  int64_t marker = -1;
+  uint32_t raw[] = {10, 20};
+  ASSERT_GE(static_cast<size_t>(values.length), sizeof(marker) + sizeof(raw));
+  size_t start = body + static_cast<size_t>(values.offset);
+  memcpy(bytes.data() + start, &marker, sizeof(marker));
+  memcpy(bytes.data() + start + sizeof(marker), raw, sizeof(raw));
+  values.length = sizeof(marker) + sizeof(raw);
+  auto record_batch = MutableRecordBatch(&bytes);
+  memcpy(MutableVectorData(&bytes, record_batch, 2) + sizeof(TestArrowBuffer),
+         &values, sizeof(values));
+
+  auto dst = Deserialize(bytes, &pool, src.CreateSpec());
+  ASSERT_OK(dst);
+  EXPECT_EQ((dst->GetCellUnchecked<1>(kUint32NonNull, 0)), 10u);
+  EXPECT_EQ((dst->GetCellUnchecked<1>(kUint32NonNull, 1)), 20u);
+}
+
+TEST(ArrowDeserializerTest, ZstdRejectsCorruptBuffers) {
+  StringPool pool;
+  auto src = MakeDataframe(kUint32NonNull, &pool, uint32_t{10}, uint32_t{20});
+  std::vector<uint8_t> bytes = Serialize(src, pool, kOmitIds, kZstd);
+  auto [values, body] = ValuesBuffer(&bytes);
+  size_t start = body + static_cast<size_t>(values.offset);
+
+  std::vector<uint8_t> wrong_length = bytes;
+  int64_t length = 12;
+  memcpy(wrong_length.data() + start, &length, sizeof(length));
+  EXPECT_THAT(Deserialize(wrong_length, &pool, src.CreateSpec()), IsError());
+
+  std::vector<uint8_t> corrupt_frame = bytes;
+  corrupt_frame[start + sizeof(int64_t)] ^= 0xFF;
+  EXPECT_THAT(Deserialize(corrupt_frame, &pool, src.CreateSpec()), IsError());
+
+  std::vector<uint8_t> truncated_frame = bytes;
+  values.length -= 1;
+  auto record_batch = MutableRecordBatch(&truncated_frame);
+  memcpy(MutableVectorData(&truncated_frame, record_batch, 2) +
+             sizeof(TestArrowBuffer),
+         &values, sizeof(values));
+  EXPECT_THAT(Deserialize(truncated_frame, &pool, src.CreateSpec()), IsError());
+}
+
+TEST(ArrowDeserializerTest, RejectsLz4FrameCompression) {
+  StringPool pool;
+  auto src = MakeDataframe(kUint32NonNull, &pool, uint32_t{10});
+  std::vector<uint8_t> bytes = Serialize(src, pool, kOmitIds, kZstd);
+  auto compression = MutableRecordBatch(&bytes).Table(3);
+  ASSERT_TRUE(static_cast<bool>(compression));
+  const uint8_t* codec = compression.FieldRaw(0, sizeof(uint8_t));
+  ASSERT_NE(codec, nullptr);
+  bytes[static_cast<size_t>(codec - bytes.data())] = 0;  // LZ4_FRAME
+
+  auto result = Deserialize(bytes, &pool, src.CreateSpec());
+  ASSERT_THAT(result, IsError());
+  EXPECT_NE(result.status().message().find("LZ4"), std::string::npos);
 }
 
 }  // namespace

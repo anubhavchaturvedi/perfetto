@@ -49,6 +49,7 @@
 #include "perfetto/trace_processor/trace_blob.h"
 #include "perfetto/trace_processor/trace_blob_view.h"
 #include "perfetto/trace_processor/trace_processor.h"
+#include "src/trace_processor/core/dataframe/arrow_serializer.h"
 #include "src/trace_processor/core/plugin/plugin.h"
 #include "src/trace_processor/forwarding_trace_parser.h"
 #include "src/trace_processor/importers/android_bugreport/android_dumpstate_event_parser.h"
@@ -328,6 +329,27 @@ std::pair<int64_t, int64_t> AggregatePluginTimestampBounds(
 // against this normalized form and are documented to match ExecuteQuery's.
 std::string NormalizeExecuteQuerySql(const std::string& sql) {
   return base::ReplaceAll(sql, "\u00A0", " ");
+}
+
+// Compressing the Arrow members of an export is opt-in, through the developer
+// flag export-compression=zstd: uncompressed archives remain the default as
+// they can be mapped without copying.
+base::StatusOr<core::dataframe::ArrowSerializer::Compression>
+GetExportCompression(const Config& config) {
+  using Compression = core::dataframe::ArrowSerializer::Compression;
+  if (!config.enable_dev_features) {
+    return Compression::kNone;
+  }
+  auto it = config.dev_flags.find("export-compression");
+  if (it == config.dev_flags.end() || it->second == "none") {
+    return Compression::kNone;
+  }
+  if (it->second == "zstd") {
+    return Compression::kZstd;
+  }
+  return base::ErrStatus(
+      "Unknown export-compression '%s' (expected 'none' or 'zstd')",
+      it->second.c_str());
 }
 
 }  // namespace
@@ -1252,8 +1274,11 @@ base::Status TraceProcessorImpl::Export(ExportFormat format,
         base::OnScopeExit([conn] { conn->SetAttachCreateWriteEnabled(false); });
     return ExportSqliteDatabase(this, file_system, *path);
   }
-  return trace_export::WriteExport(
-      plugin_dataframes_, context()->storage->string_pool(), format, output);
+  ASSIGN_OR_RETURN(core::dataframe::ArrowSerializer::Compression compression,
+                   GetExportCompression(config_));
+  return trace_export::WriteExport(plugin_dataframes_,
+                                   context()->storage->string_pool(), format,
+                                   compression, output);
 }
 
 }  // namespace perfetto::trace_processor
