@@ -43,6 +43,7 @@
 #include "src/trace_processor/importers/common/track_tracker.h"
 #include "src/trace_processor/importers/common/tracks.h"
 #include "src/trace_processor/importers/common/tracks_common.h"
+#include "src/trace_processor/importers/json/json_compact_args.h"
 #include "src/trace_processor/importers/systrace/systrace_line.h"
 #include "src/trace_processor/storage/stats.h"
 #include "src/trace_processor/storage/trace_storage.h"
@@ -103,8 +104,10 @@ TrackCompressor::AsyncSliceType AsyncSliceTypeForPhase(char phase) {
 
 }  // namespace
 
-JsonTraceParser::JsonTraceParser(TraceProcessorContext* context)
+JsonTraceParser::JsonTraceParser(TraceProcessorContext* context,
+                                 JsonCompactArgs* compact_args)
     : context_(context),
+      compact_args_(compact_args),
       systrace_line_parser_(context),
       process_sort_index_hint_id_(
           context->storage->InternString("process_sort_index_hint")),
@@ -141,11 +144,21 @@ void JsonTraceParser::ParseJsonPacket(int64_t timestamp, JsonEvent event) {
   // ignored in other cases. This lambda is only safe to call within the
   // scope of this function due to the capture by reference.
   auto args_inserter = [&](ArgsTracker::BoundInserter* inserter) {
-    if (event.args_size > 0) {
-      json::AddJsonValueToArgs(
-          it_, event.args.get(), event.args.get() + event.args_size,
-          /* flat_key = */ "args",
-          /* key = */ "args", context_->storage.get(), inserter);
+    switch (event.args_type) {
+      case JsonEvent::ArgsType::kNone:
+        break;
+      case JsonEvent::ArgsType::kJson: {
+        std::string_view args(event.args.get(), event.args_size);
+        json::AddJsonValueToArgs(it_, args.data(), args.data() + args.size(),
+                                 /* flat_key = */ "args",
+                                 /* key = */ "args", context_->storage.get(),
+                                 inserter);
+        break;
+      }
+      case JsonEvent::ArgsType::kCompact:
+        compact_args_->AddArgs(
+            std::string_view(event.args.get(), event.args_size), inserter);
+        break;
     }
   };
 
@@ -268,11 +281,13 @@ void JsonTraceParser::ParseJsonPacket(int64_t timestamp, JsonEvent event) {
       break;
     }
     case 'C': {  // TRACE_EVENT_COUNTER
-      if (event.args_size == 0) {
+      if (event.args_type == JsonEvent::ArgsType::kNone) {
         RecordEventError(timestamp, event, stats::json_parser_failure);
         return;
       }
-      it_.Reset(event.args.get(), event.args.get() + event.args_size);
+      PERFETTO_DCHECK(event.args_type == JsonEvent::ArgsType::kJson);
+      std::string_view args(event.args.get(), event.args_size);
+      it_.Reset(args.data(), args.data() + args.size());
       if (!it_.ParseStart()) {
         RecordEventError(timestamp, event, stats::json_parser_failure);
         return;
@@ -436,8 +451,10 @@ void JsonTraceParser::ParseJsonPacket(int64_t timestamp, JsonEvent event) {
       row.state = slice_name_id;
 
       std::optional<uint32_t> cpu;
-      if (event.args_size > 0) {
-        it_.Reset(event.args.get(), event.args.get() + event.args_size);
+      if (event.args_type != JsonEvent::ArgsType::kNone) {
+        PERFETTO_DCHECK(event.args_type == JsonEvent::ArgsType::kJson);
+        std::string_view args(event.args.get(), event.args_size);
+        it_.Reset(args.data(), args.data() + args.size());
         if (!it_.ParseStart()) {
           RecordEventError(timestamp, event, stats::json_parser_failure);
         } else {
@@ -480,7 +497,7 @@ void JsonTraceParser::ParseJsonPacket(int64_t timestamp, JsonEvent event) {
       break;
     }
     case 'M': {  // Metadata events (process and thread names).
-      if (event.args_size == 0) {
+      if (event.args_type == JsonEvent::ArgsType::kNone) {
         break;
       }
       base::StringView name = storage->GetString(event.name);
@@ -488,7 +505,9 @@ void JsonTraceParser::ParseJsonPacket(int64_t timestamp, JsonEvent event) {
           name != "process_sort_index" && name != "thread_sort_index") {
         break;
       }
-      it_.Reset(event.args.get(), event.args.get() + event.args_size);
+      PERFETTO_DCHECK(event.args_type == JsonEvent::ArgsType::kJson);
+      std::string_view args(event.args.get(), event.args_size);
+      it_.Reset(args.data(), args.data() + args.size());
       if (!it_.ParseStart()) {
         RecordEventError(timestamp, event, stats::json_parser_failure);
         break;

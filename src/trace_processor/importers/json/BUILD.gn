@@ -16,6 +16,8 @@ import("../../../../gn/test.gni")
 
 source_set("json") {
   sources = [
+    "json_compact_args.cc",
+    "json_compact_args.h",
     "json_trace_parser.cc",
     "json_trace_parser.h",
     "json_trace_tokenizer.cc",
@@ -23,6 +25,7 @@ source_set("json") {
   ]
   deps = [
     "../../../../gn:default_deps",
+    "../../../protozero",
     "../../containers",
     "../../sorter",
     "../../storage",
@@ -42,10 +45,20 @@ source_set("json") {
 
 perfetto_unittest_source_set("unittests") {
   testonly = true
-  sources = [ "json_trace_tokenizer_unittest.cc" ]
+  sources = [
+    "json_compact_args_unittest.cc",
+    "json_trace_tokenizer_unittest.cc",
+  ]
   deps = [
     ":json",
     "../../../../gn:default_deps",
     "../../../../gn:gtest_and_gmock",
+    "../../storage",
+    "../../tables",
+    "../../types",
+    "../../util:json_args",
+    "../../util:json_parser",
+    "../common",
+    "../common:parser_types",
   ]
 }

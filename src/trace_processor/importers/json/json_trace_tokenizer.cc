@@ -402,6 +402,15 @@ bool ParseId2(json::Iterator& inner_it,
   return true;
 }
 
+void StoreEventArgs(JsonEvent::ArgsType type,
+                    std::string_view bytes,
+                    JsonEvent* event) {
+  event->args = std::make_unique<char[]>(bytes.size());
+  memcpy(event->args.get(), bytes.data(), bytes.size());
+  event->args_size = bytes.size();
+  event->args_type = type;
+}
+
 class JsonSink : public TraceSorter::Sink<JsonEvent, JsonSink> {
  public:
   explicit JsonSink(JsonTraceParser* parser) : parser_(parser) {}
@@ -594,7 +603,8 @@ bool MinifyJson(std::string_view json, std::string* out) {
 
 JsonTraceTokenizer::JsonTraceTokenizer(TraceProcessorContext* ctx)
     : context_(ctx),
-      parser_(ctx),
+      compact_args_(ctx->storage.get()),
+      parser_(ctx, &compact_args_),
       v8_tracker_(std::make_unique<LegacyV8CpuProfileTracker>(ctx)),
       json_stream_(
           context_->sorter->CreateStream(std::make_unique<JsonSink>(&parser_))),
@@ -958,12 +968,47 @@ bool JsonTraceTokenizer::ParseTraceEventContents() {
 }
 
 void JsonTraceTokenizer::SetEventArgs(std::string_view args, JsonEvent* event) {
+  // Must match the use of args by JsonTraceParser::ParseJsonPacket().
+  switch (event->phase) {
+    case 'B':
+    case 'E':
+    case 'b':
+    case 'e':
+    case 'n':
+    case 'X':
+    case 'R':
+    case 'I':
+    case 'i': {
+      // These args are only flattened into the args table. Those of end
+      // events are merged with the args of their begin event, which decide
+      // how array elements are numbered: keep any with arrays as JSON.
+      bool allow_arrays = event->phase != 'E' && event->phase != 'e';
+      if (!compact_args_.Encode(args, allow_arrays, &encoded_args_)) {
+        break;
+      }
+      // Replaying no args is a no-op, so empty objects need no storage.
+      if (!encoded_args_.empty()) {
+        StoreEventArgs(JsonEvent::ArgsType::kCompact,
+                       std::string_view(
+                           reinterpret_cast<const char*>(encoded_args_.data()),
+                           encoded_args_.size()),
+                       event);
+      }
+      return;
+    }
+    case 'C':
+    case 'T':
+    case 'M':
+      // These args are parsed as JSON.
+      break;
+    default:
+      // The args of other phases are never read.
+      return;
+  }
   if (MinifyJson(args, &minified_args_)) {
     args = minified_args_;
   }
-  event->args = std::make_unique<char[]>(args.size());
-  memcpy(event->args.get(), args.data(), args.size());
-  event->args_size = args.size();
+  StoreEventArgs(JsonEvent::ArgsType::kJson, args, event);
 }
 
 base::Status JsonTraceTokenizer::ParseV8SampleEvent(const JsonEvent& event,

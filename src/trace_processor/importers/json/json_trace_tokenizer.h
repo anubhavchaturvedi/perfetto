@@ -29,6 +29,7 @@
 #include "src/trace_processor/importers/common/clock_tracker.h"
 #include "src/trace_processor/importers/common/legacy_v8_cpu_profile_tracker.h"
 #include "src/trace_processor/importers/common/parser_types.h"
+#include "src/trace_processor/importers/json/json_compact_args.h"
 #include "src/trace_processor/importers/json/json_trace_parser.h"
 #include "src/trace_processor/importers/systrace/systrace_line.h"
 #include "src/trace_processor/importers/systrace/systrace_line_tokenizer.h"
@@ -129,7 +130,7 @@ class JsonTraceTokenizer : public ChunkedTraceReader {
   base::Status ParseV8SampleEvent(const JsonEvent& event,
                                   std::string_view args);
 
-  // Stores a copy of the raw JSON |args| of |event|, minified if possible.
+  // Stores the JSON |args| of |event| in the form its parser needs, if any.
   void SetEventArgs(std::string_view args, JsonEvent* event);
 
   base::Status HandleTraceEvent(const char* start,
@@ -162,6 +163,8 @@ class JsonTraceTokenizer : public ChunkedTraceReader {
 
   TraceProcessorContext* const context_;
 
+  // Declared before |parser_|, which replays the args encoded with it.
+  JsonCompactArgs compact_args_;
   JsonTraceParser parser_;
   std::unique_ptr<LegacyV8CpuProfileTracker> v8_tracker_;
   std::unique_ptr<TraceSorter::Stream<JsonEvent>> json_stream_;
@@ -182,7 +185,8 @@ class JsonTraceTokenizer : public ChunkedTraceReader {
   // Used to glue together JSON objects that span across two (or more)
   // Parse boundaries.
   std::vector<char> buffer_;
-  // Scratch space for minifying the args of an event.
+  // Scratch space for encoding or minifying the args of an event.
+  std::vector<uint8_t> encoded_args_;
   std::string minified_args_;
 };
 

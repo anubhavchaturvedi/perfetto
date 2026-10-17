@@ -30,13 +30,15 @@
 
 namespace perfetto::trace_processor {
 
+class JsonCompactArgs;
 class TraceProcessorContext;
 
 // Parses legacy chrome JSON traces. The support for now is extremely rough
 // and supports only explicit TRACE_EVENT_BEGIN/END events.
 class JsonTraceParser {
  public:
-  explicit JsonTraceParser(TraceProcessorContext*);
+  // |compact_args| replays the args which the tokenizer encoded with it.
+  JsonTraceParser(TraceProcessorContext*, JsonCompactArgs* compact_args);
   ~JsonTraceParser();
 
   void ParseJsonPacket(int64_t, JsonEvent);
@@ -44,6 +46,7 @@ class JsonTraceParser {
 
  private:
   TraceProcessorContext* const context_;
+  JsonCompactArgs* const compact_args_;
   SystraceLineParser systrace_line_parser_;
   json::Iterator it_;
 

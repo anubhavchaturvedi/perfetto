@@ -76,6 +76,8 @@ struct alignas(8) JsonEvent {
   int64_t tdur = std::numeric_limits<int64_t>::max();
   int64_t async_cookie = std::numeric_limits<int64_t>::max();
 
+  // The |args_size| bytes of the args of the event, in the form given by
+  // |args_type|.
   std::unique_ptr<char[]> args;
 
   char phase = '\0';
@@ -114,7 +116,15 @@ struct alignas(8) JsonEvent {
   };
   AsyncCookieType async_cookie_type : 2;
 
-  uint64_t args_size : 41;
+  enum class ArgsType : uint64_t {
+    kNone = 0,
+    // The JSON text of the "args" object.
+    kJson = 1,
+    // The "args" object as encoded by JsonCompactArgs.
+    kCompact = 2,
+  };
+  ArgsType args_type : 2;
+  uint64_t args_size : 39;
 
   JsonEvent()
       : flow_in(false),
@@ -128,6 +138,7 @@ struct alignas(8) JsonEvent {
         bind_id_type(IdType::kNone),
         scope(Scope::kNone),
         async_cookie_type(AsyncCookieType::kNone),
+        args_type(ArgsType::kNone),
         args_size(0) {}
 };
 static_assert(sizeof(JsonEvent) % 8 == 0);
