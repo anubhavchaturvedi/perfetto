@@ -90,6 +90,24 @@ source_set("trace_session") {
   ]
 }
 
+# The interval kernels behind the interval_* table functions. Plain C++ over
+# (ts, dur, id) triples: no DuckDB dependency, built with Perfetto's usual
+# flags.
+source_set("interval_ops") {
+  sources = [
+    "src/interval_ops.cc",
+    "src/interval_ops.h",
+  ]
+  public_deps = [
+    "../../include/perfetto/base",
+    "../../include/perfetto/ext/base",
+  ]
+  deps = [
+    "../../gn:default_deps",
+    "../../src/base",
+  ]
+}
+
 # The only code which includes DuckDB headers.
 source_set("duckdb_glue") {
   sources = [ "src/perfetto_extension.cc" ]
@@ -127,9 +145,13 @@ shared_library("perfetto_duckdb") {
 
 executable("perfetto_duckdb_unittests") {
   testonly = true
-  sources = [ "src/block_rewriter_unittest.cc" ]
+  sources = [
+    "src/block_rewriter_unittest.cc",
+    "src/interval_ops_unittest.cc",
+  ]
   deps = [
     ":block_rewriter",
+    ":interval_ops",
     "../../gn:default_deps",
     "../../gn:gtest_and_gmock",
     "../../gn:gtest_main",
